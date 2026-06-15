@@ -29,6 +29,12 @@ function appendOptions(url) {
   url.searchParams.set('minLabelScore', document.getElementById('min-label-score').value);
 }
 
+function detectUploadKind(filename) {
+  const name = String(filename || '').toLowerCase();
+  if (name.endsWith('.mp4') || name.endsWith('.m4v')) return 'mp4';
+  return 'jpeg';
+}
+
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
   const file = fileInput.files[0];
@@ -46,7 +52,14 @@ form.addEventListener('submit', async (event) => {
       throw new Error(await res.text());
     }
     const job = await res.json();
-    location.href = '/wait/' + encodeURIComponent(job.id);
+    const kind = job.kind || detectUploadKind(file.name);
+    if (kind === 'mp4') {
+      message.textContent = 'opening live interactive viewer...';
+      location.href = '/result/' + encodeURIComponent(job.id);
+    } else {
+      message.textContent = 'processing...';
+      location.href = '/wait/' + encodeURIComponent(job.id);
+    }
   } catch (err) {
     message.textContent = 'error: ' + err.message;
     button.disabled = false;

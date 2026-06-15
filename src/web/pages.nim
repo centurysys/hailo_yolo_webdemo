@@ -80,17 +80,17 @@ proc renderResultPage*(job: JobInfo): string =
       let generatedBlock =
         if isDone:
           &"""
-    <div class="media-card">
+    <div id="generated-output-card" class="media-card" data-output-url="/job-media/{safeJobId}/output.mp4">
       <h3>Generated overlay MP4</h3>
       <p class="muted">bbox / label を焼き込んだ生成済みMP4です。ダウンロードにも使えます。</p>
       <video class="result-media" controls preload="metadata" src="/job-media/{safeJobId}/output.mp4"></video>
     </div>"""
         else:
           &"""
-    <div class="media-card pending-output-card">
+    <div id="generated-output-card" class="media-card pending-output-card" data-output-url="/job-media/{safeJobId}/output.mp4">
       <h3>Generated overlay MP4</h3>
-      <p class="muted">bbox / label を焼き込んだMP4は処理完了後に表示されます。処理中は上の Interactive viewer で、取得済みのHAILO検出結果を元動画へ重ねて確認できます。</p>
-      <progress value="{job.progress}" max="100"></progress>
+      <p id="generated-output-status" class="muted">bbox / label を焼き込んだMP4は処理完了後に表示されます。処理中は上の Interactive viewer で、取得済みのHAILO検出結果を元動画へ重ねて確認できます。</p>
+      <progress id="generated-output-progress" value="{job.progress}" max="100"></progress>
     </div>"""
 
       let viewerNote =

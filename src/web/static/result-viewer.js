@@ -20,7 +20,13 @@
   const ctx = canvas.getContext('2d');
   const detectionsUrl = root.dataset.detectionsUrl;
   const liveDetectionsUrl = root.dataset.liveDetectionsUrl;
+  const jobApiUrl = root.dataset.jobApiUrl;
   const initialJobStatus = root.dataset.jobStatus || '';
+  const generatedOutputCard = document.getElementById('generated-output-card');
+  const generatedOutputProgress = document.getElementById('generated-output-progress');
+  const generatedOutputStatus = document.getElementById('generated-output-status');
+  const downloadOutputLink = document.getElementById('download-output-link');
+  const detectionsOutputLink = document.getElementById('detections-output-link');
   const presets = {
     light: { maxBoxes: 8, maxLabels: 3, minBoxScore: 0.35, minLabelScore: 0.60 },
     balanced: { maxBoxes: 12, maxLabels: 6, minBoxScore: 0.25, minLabelScore: 0.50 },
@@ -43,6 +49,8 @@
   let liveDone = false;
   let livePollTimer = 0;
   let liveLineCount = 0;
+  let jobPollTimer = 0;
+  let generatedOutputShown = initialJobStatus === 'done';
 
   function setStatus(text) {
     if (statusText) statusText.textContent = text;
@@ -51,6 +59,80 @@
   function setDataStatus(text) {
     dataStatus = text;
     setStatus(text);
+  }
+
+
+
+  function showGeneratedOutput() {
+    if (!generatedOutputCard || generatedOutputShown) return;
+    const outputUrl = generatedOutputCard.dataset.outputUrl || '';
+    if (!outputUrl) return;
+
+    generatedOutputShown = true;
+    generatedOutputCard.classList.remove('pending-output-card');
+    generatedOutputCard.innerHTML = '';
+
+    const title = document.createElement('h3');
+    title.textContent = 'Generated overlay MP4';
+
+    const note = document.createElement('p');
+    note.className = 'muted';
+    note.textContent = 'bbox / label を焼き込んだ生成済みMP4です。ダウンロードにも使えます。';
+
+    const outputVideo = document.createElement('video');
+    outputVideo.className = 'result-media';
+    outputVideo.controls = true;
+    outputVideo.preload = 'metadata';
+    outputVideo.src = outputUrl + '?v=' + Date.now();
+
+    generatedOutputCard.append(title, note, outputVideo);
+  }
+
+  function markJobDone() {
+    showGeneratedOutput();
+    if (downloadOutputLink) downloadOutputLink.hidden = false;
+    if (detectionsOutputLink) {
+      detectionsOutputLink.href = detectionsUrl || detectionsOutputLink.href;
+      detectionsOutputLink.textContent = 'Detection JSON';
+    }
+  }
+
+  function updatePendingOutput(job) {
+    if (!job || job.status === 'done') {
+      markJobDone();
+      return;
+    }
+
+    if (generatedOutputProgress && Number.isFinite(Number(job.progress))) {
+      generatedOutputProgress.value = Number(job.progress);
+    }
+    if (generatedOutputStatus) {
+      const message = job.message ? ` ${job.message}` : '';
+      generatedOutputStatus.textContent = `Generated overlay MP4 is still processing.${message}`;
+    }
+  }
+
+  async function pollJobStatus() {
+    if (!jobApiUrl || generatedOutputShown) return;
+    try {
+      const res = await fetch(jobApiUrl + '?v=' + Date.now(), { cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const job = await res.json();
+      updatePendingOutput(job);
+      if (job.status === 'done') {
+        await loadFinalDetections(false);
+        return;
+      }
+      if (job.status === 'failed') {
+        if (generatedOutputStatus) {
+          generatedOutputStatus.textContent = `Generated overlay MP4 failed: ${job.message || 'unknown error'}`;
+        }
+        return;
+      }
+    } catch (err) {
+      if (generatedOutputStatus) generatedOutputStatus.textContent = `Job status update failed: ${err.message}`;
+    }
+    jobPollTimer = setTimeout(pollJobStatus, 1000);
   }
 
   function currentPreset() {
@@ -324,6 +406,7 @@
         livePollTimer = 0;
       }
       setDataStatus(`loaded ${frames.length} final frames`);
+      markJobDone();
       redraw();
       return true;
     } catch (err) {
@@ -537,6 +620,7 @@
   document.addEventListener('fullscreenchange', redraw);
 
   updatePlaybackUi();
+  if (initialJobStatus !== 'done') pollJobStatus();
 
   if (initialJobStatus === 'done') {
     loadFinalDetections(true).then((ok) => {

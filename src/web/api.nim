@@ -11,6 +11,7 @@ import ../types
 type
   UploadResponse = object
     id: string
+    kind: string
     status: string
 
   JobResponse = object
@@ -31,6 +32,7 @@ proc encodeJson[T](value: T): string {.gcsafe.} =
 proc uploadJson*(job: JobInfo): string {.gcsafe.} =
   UploadResponse(
     id: job.id,
+    kind: job.kind.toWire,
     status: job.status.toWire
   ).encodeJson()
 
