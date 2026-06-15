@@ -44,6 +44,10 @@ proc outputPath*(jobsDir, jobId: string, kind: JobKind): string =
   of jkMp4:
     jobsDir.jobDir(jobId) / "output.mp4"
 
+
+proc previewPath*(jobsDir, jobId: string): string =
+  jobsDir.jobDir(jobId) / "preview.jpg"
+
 proc extractedFramePath*(jobsDir, jobId: string): string =
   jobsDir.jobDir(jobId) / "frame.jpg"
 

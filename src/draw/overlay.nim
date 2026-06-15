@@ -190,6 +190,41 @@ proc formatBytes(value: int64): string =
   else:
     result = &"{value}B"
 
+
+proc formatDurationMs(ms: int): string =
+  if ms >= 1000:
+    result = &"{float(ms) / 1000.0:.2f}s"
+  else:
+    result = &"{ms}ms"
+
+proc formatThroughputFps(frames, ms: int): string =
+  if frames > 0 and ms > 0:
+    result = &"{float(frames) * 1000.0 / float(ms):.1f}fps"
+  else:
+    result = "n/a"
+
+proc formatOverlaySummary*(s: OverlayStats): string =
+  ## Short human-facing result text for the web UI.  The verbose timing detail
+  ## remains available through formatOverlayStats() and is shown in a <details>
+  ## block on the result page.
+  if s.videoFrames > 0:
+    let
+      fps = formatThroughputFps(s.videoFrames, s.totalMs)
+      duration = formatDurationMs(s.totalMs)
+      outputDetail =
+        if s.videoPacketBytes > 0:
+          &", output={formatBytes(s.videoPacketBytes)}"
+        else:
+          ""
+    result = &"MP4 complete: {s.videoFrames} frames in {duration} ({fps}); detections={s.detections}, boxes={s.boxesDrawn}, labels={s.labelsDrawn}{outputDetail}"
+  else:
+    let drawCountDetail =
+      if s.boxesDrawn > 0 or s.labelsDrawn > 0:
+        &", boxes={s.boxesDrawn}, labels={s.labelsDrawn}"
+      else:
+        ""
+    result = &"complete: {s.imageWidth}x{s.imageHeight} in {formatDurationMs(s.totalMs)}; detections={s.detections}{drawCountDetail}"
+
 proc formatInferStats(s: OverlayStats): string =
   if s.inferSubmitMs > 0 or s.inferWaitMs > 0:
     let hailoDetail =
@@ -433,6 +468,33 @@ proc moveRgbxDataToPixieImage(frame: var OwnedRGBXFrame): Image =
 
 proc movePixieImageDataBack(image: var Image; frame: var OwnedRGBXFrame) =
   frame.data = move cast[ptr seq[PixelRGBX]](addr image.data)[]
+
+
+proc resolveVideoPreviewFrame(): int =
+  ## Save one annotated JPEG preview frame during MP4 processing.  This is used
+  ## by the wait page so users can see that the pipeline is really working.
+  result = max(1, parseEnvIntDraw("HAILO_DEMO_VIDEO_PREVIEW_FRAME", 10))
+
+proc saveRgbxFramePreviewJpeg(frame: var OwnedRGBXFrame; outputPath: string) =
+  if outputPath.len == 0:
+    return
+
+  let tmpPath = outputPath & ".tmp"
+  var image = moveRgbxDataToPixieImage(frame)
+  try:
+    image.encodeImageToJpeg(tmpPath)
+  finally:
+    movePixieImageDataBack(image, frame)
+
+  try:
+    moveFile(tmpPath, outputPath)
+  except OSError:
+    try:
+      if fileExists(outputPath):
+        removeFile(outputPath)
+    except OSError:
+      discard
+    moveFile(tmpPath, outputPath)
 
 proc drawDetectionsOnRgbxFrame(
     frame: var OwnedRGBXFrame;
@@ -764,6 +826,9 @@ proc drainOldestPendingVideoFrame(
     font: Font;
     hasFont: bool;
     drawOptions: OverlayDrawOptions;
+    previewOutputPath: string;
+    previewFrameNumber: int;
+    previewSaved: var bool;
     rgbxPool: var seq[OwnedRGBXFrame];
     stats: var OverlayStats
   ) =
@@ -801,6 +866,11 @@ proc drainOldestPendingVideoFrame(
   stats.labelsDrawn += drawResult.labels
   stats.drawMs += elapsedMs(stageStart)
   stats.detections += yoloResult.detections.len
+
+  let completedFrameNumber = stats.videoFrames + 1
+  if not previewSaved and previewOutputPath.len > 0 and completedFrameNumber >= previewFrameNumber:
+    saveRgbxFramePreviewJpeg(item.rgbx, previewOutputPath)
+    previewSaved = true
 
   stageStart = epochTime()
   encodeRgbxFrameNv12(encoder, writer, item.rgbx, int64(stats.videoFrames), stats)
@@ -863,9 +933,11 @@ type
     frameQ: ThreadQueue[VideoPipelineItem]
     resultQ: ThreadQueue[VideoPipelineWorkerResult]
     outputPath: SharedCString
+    previewOutputPath: SharedCString
     fontPath: SharedCString
     fps: int
     bitrate: int
+    previewFrameNumber: int
     encoderName: SharedCString
 
 proc `=destroy`(self: var VideoPipelineItem) {.raises: [].} =
@@ -943,6 +1015,9 @@ proc processThreadedVideoPipelineFrame(
     font: Font;
     hasFont: bool;
     drawOptions: OverlayDrawOptions;
+    previewOutputPath: string;
+    previewFrameNumber: int;
+    previewSaved: var bool;
     stats: var OverlayStats
   ) =
   var yoloResult: YoloAsyncResult
@@ -980,6 +1055,12 @@ proc processThreadedVideoPipelineFrame(
   stats.drawMs += elapsedMs(stageStart)
   stats.detections += yoloResult.detections.len
 
+  let completedFrameNumber = stats.videoFrames + 1
+  if not previewSaved and previewOutputPath.len > 0 and completedFrameNumber >= previewFrameNumber:
+    {.cast(gcsafe).}:
+      saveRgbxFramePreviewJpeg(item.rgbx.value, previewOutputPath)
+    previewSaved = true
+
   stageStart = epochTime()
   encodeRgbxFrameNv12(encoder, writer, item.rgbx.value, int64(stats.videoFrames), stats)
   stats.encodeMs += elapsedMs(stageStart)
@@ -993,6 +1074,7 @@ proc videoPipelineConsumerMain(state: VideoPipelineWorkerState) {.thread.} =
   try:
     let
       outputPath = state.outputPath.toLocalString()
+      previewOutputPath = state.previewOutputPath.toLocalString()
       fontPath = state.fontPath.toLocalString()
       encoderName = state.encoderName.toLocalString()
       loadedFont = loadOverlayFont(fontPath)
@@ -1001,6 +1083,7 @@ proc videoPipelineConsumerMain(state: VideoPipelineWorkerState) {.thread.} =
       encoder: VideoEncoder
       writer: Mp4VideoWriter
       encoderReady = false
+      previewSaved = false
 
     try:
       while true:
@@ -1045,6 +1128,9 @@ proc videoPipelineConsumerMain(state: VideoPipelineWorkerState) {.thread.} =
             loadedFont.font,
             loadedFont.hasFont,
             drawOptions,
+            previewOutputPath,
+            state.previewFrameNumber,
+            previewSaved,
             workerResult.stats
           )
 
@@ -1138,6 +1224,7 @@ proc mergeThreadedVideoStats(result: var OverlayStats; workerStats: OverlayStats
 
 proc drawMp4VideoOverlayThreaded(
     inputPath, outputPath, fontPath: string;
+    previewOutputPath = "";
     onProgress: OverlayProgressCallback = nil;
     progressCtx: pointer = nil
   ): OverlayStats =
@@ -1155,6 +1242,7 @@ proc drawMp4VideoOverlayThreaded(
   let maxFrames = parseEnvInt("HAILO_DEMO_MP4_VIDEO_MAX_FRAMES", 90)
   let encoderName = resolveMp4VideoEncoderName()
   let maxInFlight = resolveMp4VideoInFlight()
+  let previewFrameNumber = resolveVideoPreviewFrame()
   let framePoolCapacity = resolveMp4VideoFramePoolCapacity(maxInFlight)
   let queueCapacity = maxInFlight
 
@@ -1172,6 +1260,7 @@ proc drawMp4VideoOverlayThreaded(
 
   var
     sharedOutputPath = initSharedCString(outputPath)
+    sharedPreviewOutputPath = initSharedCString(previewOutputPath)
     sharedFontPath = initSharedCString(fontPath)
     sharedEncoderName = initSharedCString(encoderName)
 
@@ -1179,9 +1268,11 @@ proc drawMp4VideoOverlayThreaded(
     frameQ: frameQ,
     resultQ: resultQ,
     outputPath: sharedOutputPath,
+    previewOutputPath: sharedPreviewOutputPath,
     fontPath: sharedFontPath,
     fps: fps,
     bitrate: bitrate,
+    previewFrameNumber: previewFrameNumber,
     encoderName: sharedEncoderName
   )
   var consumerThread: Thread[VideoPipelineWorkerState]
@@ -1278,6 +1369,7 @@ proc drawMp4VideoOverlayThreaded(
     consumerStarted = false
 
     sharedOutputPath.freeSharedCString()
+    sharedPreviewOutputPath.freeSharedCString()
     sharedFontPath.freeSharedCString()
     sharedEncoderName.freeSharedCString()
 
@@ -1303,12 +1395,14 @@ proc drawMp4VideoOverlayThreaded(
         discard
       joinThread(consumerThread)
       sharedOutputPath.freeSharedCString()
+      sharedPreviewOutputPath.freeSharedCString()
       sharedFontPath.freeSharedCString()
       sharedEncoderName.freeSharedCString()
     raise
 
 proc drawMp4VideoOverlayLookahead(
     inputPath, outputPath, fontPath: string;
+    previewOutputPath = "";
     onProgress: OverlayProgressCallback = nil;
     progressCtx: pointer = nil
   ): OverlayStats =
@@ -1325,6 +1419,7 @@ proc drawMp4VideoOverlayLookahead(
   let maxFrames = parseEnvInt("HAILO_DEMO_MP4_VIDEO_MAX_FRAMES", 90)
   let encoderName = resolveMp4VideoEncoderName()
   let maxInFlight = resolveMp4VideoInFlight()
+  let previewFrameNumber = resolveVideoPreviewFrame()
   let loadedFont = loadOverlayFont(fontPath)
   let drawOptions = resolveVideoDrawOptions()
   result.pipelineInFlight = maxInFlight
@@ -1344,6 +1439,7 @@ proc drawMp4VideoOverlayLookahead(
     encoderReady = false
     pendingFrames: seq[PendingVideoFrame] = @[]
     rgbxPool: seq[OwnedRGBXFrame] = @[]
+    previewSaved = false
 
   defer:
     if not writer.isNil:
@@ -1423,6 +1519,9 @@ proc drawMp4VideoOverlayLookahead(
         loadedFont.font,
         loadedFont.hasFont,
         drawOptions,
+        previewOutputPath,
+        previewFrameNumber,
+        previewSaved,
         rgbxPool,
         result
       )
@@ -1436,6 +1535,9 @@ proc drawMp4VideoOverlayLookahead(
       loadedFont.font,
       loadedFont.hasFont,
       drawOptions,
+      previewOutputPath,
+      previewFrameNumber,
+      previewSaved,
       rgbxPool,
       result
     )
@@ -1463,6 +1565,7 @@ proc drawMp4VideoOverlayLookahead(
 
 proc drawMp4VideoOverlay*(
     inputPath, outputPath, fontPath: string;
+    previewOutputPath = "";
     onProgress: OverlayProgressCallback = nil;
     progressCtx: pointer = nil
   ): OverlayStats =
@@ -1471,6 +1574,7 @@ proc drawMp4VideoOverlay*(
       inputPath,
       outputPath,
       fontPath,
+      previewOutputPath,
       onProgress,
       progressCtx
     )
@@ -1479,6 +1583,7 @@ proc drawMp4VideoOverlay*(
     inputPath,
     outputPath,
     fontPath,
+    previewOutputPath,
     onProgress,
     progressCtx
   )

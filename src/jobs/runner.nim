@@ -16,6 +16,7 @@ import ../config
 import ../draw/overlay
 import ../infer/hailo_worker
 import ../types
+import ../util/paths
 import ./store
 
 const DefaultJobQueueSize = 16
@@ -95,9 +96,11 @@ proc processJob(store: JobStore; jobId: string) {.gcsafe.} =
       {.cast(gcsafe).}:
         stats = drawHailoOverlay(job.inputPath, job.outputPath, fontPath)
 
-      let message = "complete: " & stats.formatOverlayStats()
-      echo &"job {jobId}: {message}"
-      store.setDone(jobId, message)
+      let
+        message = stats.formatOverlaySummary()
+        detailMessage = "complete: " & stats.formatOverlayStats()
+      echo &"job {jobId}: {detailMessage}"
+      store.setDone(jobId, message, detailMessage)
 
     of jkMp4:
       store.updateJob(jobId, jsRunning, 20, "running MP4 decode / HAILO / overlay / H.264 encode")
@@ -112,13 +115,16 @@ proc processJob(store: JobStore; jobId: string) {.gcsafe.} =
           job.inputPath,
           job.outputPath,
           fontPath,
+          previewPath(jobsDir, jobId),
           updateJobProgressFromOverlay,
           addr progressCtx
         )
 
-      let message = "complete: mp4 video via libav_nim; " & stats.formatOverlayStats()
-      echo &"job {jobId}: {message}"
-      store.setDone(jobId, message)
+      let
+        message = stats.formatOverlaySummary()
+        detailMessage = "complete: mp4 video via libav_nim; " & stats.formatOverlayStats()
+      echo &"job {jobId}: {detailMessage}"
+      store.setDone(jobId, message, detailMessage)
 
   except CatchableError as e:
     store.setFailed(jobId, e.msg)

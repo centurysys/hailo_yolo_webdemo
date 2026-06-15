@@ -30,6 +30,7 @@ type
     outputPath*: string
     originalName*: string
     message*: string
+    detailMessage*: string
     progress*: int
     createdAtUnix*: int64
     updatedAtUnix*: int64

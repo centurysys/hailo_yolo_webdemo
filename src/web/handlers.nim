@@ -153,6 +153,30 @@ proc handleApiJob*(request: Request) {.gcsafe.} =
 
   request.respondJson(200, jobJson(maybeJob.get))
 
+
+proc handlePreview*(request: Request) {.gcsafe.} =
+  let store = currentStore()
+  if store == nil:
+    request.respondText(500, "job store is not initialized")
+    return
+
+  let jobId = trailingPathSegment(request.path, "/preview/")
+  let maybeJob = store.getJob(jobId)
+  if maybeJob.isNone:
+    request.respondText(404, "job not found")
+    return
+
+  let path = previewPath(jobsDir, jobId)
+  if not fileExists(path):
+    request.respondText(404, "preview not available")
+    return
+
+  var headers: HttpHeaders
+  headers["Content-Type"] = "image/jpeg"
+  headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+  headers["Pragma"] = "no-cache"
+  request.respond(200, headers, readFile(path))
+
 proc handleResult*(request: Request) {.gcsafe.} =
   let store = currentStore()
   if store == nil:

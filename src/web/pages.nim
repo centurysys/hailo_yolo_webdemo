@@ -29,8 +29,14 @@ button { padding: 0.55rem 1rem; border-radius: 0.4rem; border: 1px solid #0969da
 button[disabled] { opacity: 0.55; cursor: wait; }
 progress { width: 100%; height: 1rem; }
 .result-media { max-width: 100%; border-radius: 0.5rem; border: 1px solid #d0d7de; }
+.preview-card { margin-top: 1rem; }
+.preview-card img { max-width: 100%; border-radius: 0.5rem; border: 1px solid #d0d7de; display: block; }
 .muted { opacity: 0.72; }
 .error { color: #cf222e; }
+.summary-card { background: color-mix(in srgb, CanvasText 4%, Canvas); border: 1px solid #d0d7de; border-radius: 0.6rem; padding: 0.85rem; margin: 1rem 0; }
+.summary-card p { margin: 0.25rem 0 0; }
+.details-log { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.85rem; line-height: 1.45; max-height: 18rem; overflow: auto; border: 1px solid #d0d7de; border-radius: 0.5rem; padding: 0.75rem; }
+.result-actions { margin-top: 1rem; }
 .row { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
 """
 
@@ -106,9 +112,31 @@ proc renderWaitPage*(jobId: string): string =
   <p>job: <code>{safeJobId}</code></p>
   <progress id="progress" value="0" max="100"></progress>
   <p id="status" class="muted">queued</p>
+
+  <section id="preview-card" class="preview-card" hidden>
+    <h3>Preview frame</h3>
+    <p class="muted">A single annotated preview frame appears here once it becomes available.</p>
+    <img id="preview-image" alt="processing preview">
+  </section>
 </article>
 <script>
 const jobId = '{safeJobId}';
+const previewCard = document.getElementById('preview-card');
+const previewImage = document.getElementById('preview-image');
+let previewLoaded = false;
+
+function refreshPreview(job) {{
+  if (job.kind !== 'mp4') return;
+  previewImage.onload = () => {{
+    previewLoaded = true;
+    previewCard.hidden = false;
+  }};
+  previewImage.onerror = () => {{
+    if (!previewLoaded) previewCard.hidden = true;
+  }};
+  previewImage.src = '/preview/' + encodeURIComponent(jobId) + '?v=' + Date.now();
+}}
+
 async function poll() {{
   const res = await fetch('/api/jobs/' + encodeURIComponent(jobId));
   if (!res.ok) {{
@@ -118,11 +146,14 @@ async function poll() {{
   const job = await res.json();
   document.getElementById('progress').value = job.progress;
   document.getElementById('status').textContent = job.status + ' - ' + job.message;
+  if (job.status !== 'done' && job.status !== 'failed') {{
+    refreshPreview(job);
+  }}
   if (job.status === 'done' || job.status === 'failed') {{
     location.href = '/result/' + encodeURIComponent(jobId);
     return;
   }}
-  setTimeout(poll, 150);
+  setTimeout(poll, 250);
 }}
 poll();
 </script>
@@ -134,23 +165,53 @@ proc isImageOutput(job: JobInfo): bool =
   ext in [".jpg", ".jpeg"]
 
 proc renderResultPage*(job: JobInfo): string =
+  let previewBlock =
+    if job.status == jsDone and not job.isImageOutput:
+      &"<details><summary>Preview frame</summary><img class=\"result-media\" src=\"/preview/{job.id.htmlEscape}?v={job.updatedAtUnix}\" alt=\"preview frame\"></details>"
+    else:
+      ""
+
   let media =
     if job.status == jsDone:
       if job.isImageOutput:
         &"<img class=\"result-media\" src=\"/files/{job.id.htmlEscape}\" alt=\"result\">"
       else:
-        &"<video class=\"result-media\" controls src=\"/files/{job.id.htmlEscape}\"></video>"
+        &"{previewBlock}<video class=\"result-media\" controls src=\"/files/{job.id.htmlEscape}\"></video>"
     else:
       &"<p class=\"error\">{job.message.htmlEscape}</p>"
+
+  let detailBlock =
+    if job.status == jsDone and job.detailMessage.len > 0:
+      &"""
+  <details>
+    <summary>Technical timing details</summary>
+    <pre class="details-log">{job.detailMessage.htmlEscape}</pre>
+  </details>
+"""
+    else:
+      ""
+
+  let downloadLink =
+    if job.status == jsDone:
+      &"<a href=\"/files/{job.id.htmlEscape}\">Download</a>"
+    else:
+      ""
 
   let body = &"""
 <article>
   <h2>Result</h2>
   <p>job: <code>{job.id.htmlEscape}</code></p>
   <p>kind: <code>{job.kind.toWire}</code>, status: <code>{job.status.toWire}</code></p>
-  <p class="muted">{job.message.htmlEscape}</p>
+
+  <section class="summary-card">
+    <strong>Summary</strong>
+    <p>{job.message.htmlEscape}</p>
+  </section>
+
   {media}
-  <p class="row"><a href="/">Back</a><a href="/files/{job.id.htmlEscape}">Download</a></p>
+  {detailBlock}
+
+  <p class="row result-actions"><a href="/">Back</a>{downloadLink}</p>
 </article>
 """
   renderLayout("Result", body)

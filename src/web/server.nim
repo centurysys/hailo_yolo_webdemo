@@ -18,6 +18,7 @@ proc startServer*(jobStore: JobStore) =
   router.get("/wait/*", handleWait)
   router.get("/api/jobs/*", handleApiJob)
   router.get("/result/*", handleResult)
+  router.get("/preview/*", handlePreview)
   router.get("/files/*", handleFile)
   router.get("/static/demo.css", handleDemoCss)
   router.get("/static/pico.min.css", handleMissingPico)

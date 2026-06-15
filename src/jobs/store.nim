@@ -40,6 +40,7 @@ proc createJob*(
     outputPath: outputPath,
     originalName: originalName,
     message: "queued",
+    detailMessage: "",
     progress: 0,
     createdAtUnix: t,
     updatedAtUnix: t
@@ -59,7 +60,8 @@ proc updateJob*(
   id: string,
   status: JobStatus,
   progress: int,
-  message: string
+  message: string,
+  detailMessage = ""
 ) =
   withLock store.lock:
     if id in store.jobs:
@@ -72,14 +74,25 @@ proc updateJob*(
       else:
         job.progress = progress
       job.message = message
+      ## Keep the wait-page JSON small while a job is running.  Detailed
+      ## timing output is only stored for completed/failed jobs.
+      if status in {jsDone, jsFailed}:
+        job.detailMessage = detailMessage
+      else:
+        job.detailMessage = ""
       job.updatedAtUnix = nowUnix()
       store.jobs[id] = job
 
 proc setRunning*(store: JobStore, id: string, message = "running") =
   store.updateJob(id, jsRunning, 10, message)
 
-proc setDone*(store: JobStore, id: string, message = "done") =
-  store.updateJob(id, jsDone, 100, message)
+proc setDone*(
+  store: JobStore,
+  id: string,
+  message = "done",
+  detailMessage = ""
+) =
+  store.updateJob(id, jsDone, 100, message, detailMessage)
 
 proc setFailed*(store: JobStore, id: string, message: string) =
   store.updateJob(id, jsFailed, 100, message)
