@@ -38,6 +38,11 @@ progress { width: 100%; height: 1rem; }
 .summary-card p { margin: 0.25rem 0 0; }
 .details-log { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.85rem; line-height: 1.45; max-height: 18rem; overflow: auto; border: 1px solid #d0d7de; border-radius: 0.5rem; padding: 0.75rem; }
 .result-actions { margin-top: 1rem; }
+.media-grid { display: grid; grid-template-columns: 1fr; gap: 1rem; align-items: start; }
+.media-card { border: 1px solid #d0d7de; border-radius: 0.65rem; padding: 0.85rem; background: color-mix(in srgb, CanvasText 3%, Canvas); }
+.media-card h3 { margin-top: 0; }
+.media-card p { margin: 0.35rem 0 0.75rem; }
+.media-card .result-media { display: block; width: 100%; }
 .row { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
 .upload-form { display: grid; gap: 1.1rem; }
 .file-row { display: grid; gap: 0.35rem; }
@@ -300,7 +305,21 @@ proc renderResultPage*(job: JobInfo): string =
       if job.isImageOutput:
         &"<img class=\"result-media\" src=\"/files/{job.id.htmlEscape}\" alt=\"result\">"
       else:
-        &"{previewBlock}<video class=\"result-media\" controls preload=\"metadata\" src=\"/job-media/{job.id.htmlEscape}/output.mp4\"></video>"
+        &"""
+  {previewBlock}
+  <section class="media-grid" aria-label="MP4 result viewers">
+    <div class="media-card">
+      <h3>Original video</h3>
+      <p class="muted">アップロードされた元動画です。次のステップでここに検出結果を重ねます。</p>
+      <video class="result-media" controls preload="metadata" src="/job-media/{job.id.htmlEscape}/input.mp4"></video>
+    </div>
+    <div class="media-card">
+      <h3>Generated overlay MP4</h3>
+      <p class="muted">bbox / label を焼き込んだ生成済みMP4です。ダウンロードにも使えます。</p>
+      <video class="result-media" controls preload="metadata" src="/job-media/{job.id.htmlEscape}/output.mp4"></video>
+    </div>
+  </section>
+"""
     else:
       &"<p class=\"error\">{job.message.htmlEscape}</p>"
 
