@@ -1,0 +1,32 @@
+## Mummy server setup.
+
+import std/os
+import std/net
+
+import mummy, mummy/routers
+
+import ../config
+import ../jobs/store
+import ./handlers
+
+proc startServer*(jobStore: JobStore) =
+  setJobStore(jobStore)
+
+  var router: Router
+  router.get("/", handleIndex)
+  router.put("/upload", handleUpload)
+  router.get("/wait/*", handleWait)
+  router.get("/api/jobs/*", handleApiJob)
+  router.get("/result/*", handleResult)
+  router.get("/files/*", handleFile)
+  router.get("/static/demo.css", handleDemoCss)
+  router.get("/static/pico.min.css", handleMissingPico)
+  router.get("/*", handleNotFound)
+
+  let bindHost = getListenHost()
+
+  echo "HAILO_DEMO_LISTEN_HOST=", getEnv("HAILO_DEMO_LISTEN_HOST", "<unset>")
+  echo "Serving on http://", bindHost, ":", listenPort
+
+  let server = newServer(router, workerThreads = workerThreads)
+  server.serve(Port(listenPort), bindHost)
