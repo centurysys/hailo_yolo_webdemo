@@ -13,6 +13,33 @@ type
     jsDone
     jsFailed
 
+  Mp4QualityPreset* = enum
+    mpqAuto
+    mpqSmall
+    mpqBalanced
+    mpqHigh
+    mpqManual
+
+  OverlayPreset* = enum
+    opLight
+    opBalanced
+    opRich
+    opBoxesOnly
+    opManual
+
+  JobOptions* = object
+    ## Per-upload tuning options.
+    ##
+    ## Keep this object scalar-only so it can be copied into thread worker state
+    ## without moving GC-managed strings or seqs across Nim threads.
+    mp4Quality*: Mp4QualityPreset
+    manualBitrate*: int
+    overlayPreset*: OverlayPreset
+    maxBoxes*: int
+    maxLabels*: int
+    minBoxScore*: float32
+    minLabelScore*: float32
+
   Detection* = object
     classId*: int
     label*: string
@@ -29,11 +56,23 @@ type
     inputPath*: string
     outputPath*: string
     originalName*: string
+    options*: JobOptions
     message*: string
     detailMessage*: string
     progress*: int
     createdAtUnix*: int64
     updatedAtUnix*: int64
+
+proc defaultJobOptions*(): JobOptions =
+  JobOptions(
+    mp4Quality: mpqAuto,
+    manualBitrate: 0,
+    overlayPreset: opBalanced,
+    maxBoxes: 12,
+    maxLabels: 6,
+    minBoxScore: 0.25.float32,
+    minLabelScore: 0.50.float32
+  )
 
 proc toWire*(kind: JobKind): string =
   case kind
@@ -47,6 +86,22 @@ proc toWire*(status: JobStatus): string =
   of jsDone: "done"
   of jsFailed: "failed"
 
+proc toWire*(preset: Mp4QualityPreset): string =
+  case preset
+  of mpqAuto: "auto"
+  of mpqSmall: "small"
+  of mpqBalanced: "balanced"
+  of mpqHigh: "high"
+  of mpqManual: "manual"
+
+proc toWire*(preset: OverlayPreset): string =
+  case preset
+  of opLight: "light"
+  of opBalanced: "balanced"
+  of opRich: "rich"
+  of opBoxesOnly: "boxes-only"
+  of opManual: "manual"
+
 proc extension*(kind: JobKind): string =
   case kind
   of jkJpeg: ".jpg"
@@ -59,6 +114,8 @@ proc contentType*(kind: JobKind): string =
 
 proc `$`*(kind: JobKind): string = kind.toWire
 proc `$`*(status: JobStatus): string = status.toWire
+proc `$`*(preset: Mp4QualityPreset): string = preset.toWire
+proc `$`*(preset: OverlayPreset): string = preset.toWire
 
 proc summary*(job: JobInfo): string =
   &"{job.id} {job.kind.toWire} {job.status.toWire} {job.progress}% {job.message}"

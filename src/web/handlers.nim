@@ -59,6 +59,80 @@ proc queryValue(uri, key: string): string =
       if k == key:
         return decodeUrl(part[eq + 1 .. ^1])
 
+
+proc clampInt(value, lo, hi: int): int =
+  result = value
+  if result < lo:
+    result = lo
+  if result > hi:
+    result = hi
+
+proc clampFloat32(value, lo, hi: float32): float32 =
+  result = value
+  if result < lo:
+    result = lo
+  if result > hi:
+    result = hi
+
+proc parseQueryInt(uri, key: string; defaultValue, lo, hi: int): int =
+  let raw = queryValue(uri, key).strip()
+  if raw.len == 0:
+    return defaultValue
+  try:
+    result = parseInt(raw).clampInt(lo, hi)
+  except ValueError:
+    result = defaultValue
+
+proc parseQueryFloat32(uri, key: string; defaultValue, lo, hi: float32): float32 =
+  let raw = queryValue(uri, key).strip()
+  if raw.len == 0:
+    return defaultValue
+  try:
+    result = parseFloat(raw).float32.clampFloat32(lo, hi)
+  except ValueError:
+    result = defaultValue
+
+proc parseMp4QualityPreset(rawValue: string): Mp4QualityPreset =
+  case rawValue.strip().toLowerAscii()
+  of "small", "small-file", "compact": mpqSmall
+  of "balanced", "balance": mpqBalanced
+  of "high", "high-quality", "quality": mpqHigh
+  of "manual", "custom": mpqManual
+  else: mpqAuto
+
+proc parseOverlayPreset(rawValue: string): OverlayPreset =
+  case rawValue.strip().toLowerAscii()
+  of "light", "sparse": opLight
+  of "rich", "dense": opRich
+  of "boxes-only", "box", "boxes": opBoxesOnly
+  of "manual", "custom": opManual
+  else: opBalanced
+
+proc parseManualBitrate(uri: string): int =
+  ## The UI sends Mbps because that is easier to reason about from a browser.
+  ## Clamp to the demo-friendly range accepted by the MP4 path.
+  let raw = queryValue(uri, "manualBitrateMbps").strip()
+  if raw.len == 0:
+    return 0
+  try:
+    let mbps = parseFloat(raw)
+    result = int(mbps * 1_000_000.0 + 0.5).clampInt(250_000, 20_000_000)
+  except ValueError:
+    result = 0
+
+proc parseJobOptions(uri: string): JobOptions =
+  result = defaultJobOptions()
+  result.mp4Quality = parseMp4QualityPreset(queryValue(uri, "mp4Quality"))
+  result.manualBitrate = parseManualBitrate(uri)
+  result.overlayPreset = parseOverlayPreset(queryValue(uri, "overlayPreset"))
+
+  ## Manual overlay knobs are only used when overlayPreset=manual.  Still parse
+  ## them here so the media layer can stay free of HTTP/query-string logic.
+  result.maxBoxes = parseQueryInt(uri, "maxBoxes", result.maxBoxes, 0, 200)
+  result.maxLabels = parseQueryInt(uri, "maxLabels", result.maxLabels, 0, 200)
+  result.minBoxScore = parseQueryFloat32(uri, "minBoxScore", result.minBoxScore, 0.0.float32, 1.0.float32)
+  result.minLabelScore = parseQueryFloat32(uri, "minLabelScore", result.minLabelScore, 0.0.float32, 1.0.float32)
+
 proc trailingPathSegment(path, prefix: string): string =
   if path.startsWith(prefix):
     result = path[prefix.len .. ^1]
@@ -125,7 +199,8 @@ proc handleUpload*(request: Request) {.gcsafe.} =
         raise newException(ValueError, "missing X-FILE header and empty request body")
       writeFile(input, request.body)
 
-    let job = store.createJob(jobId, kind, input, output, originalName)
+    let options = parseJobOptions(request.uri)
+    let job = store.createJob(jobId, kind, input, output, originalName, options)
     store.enqueueJob(job.id)
 
     request.respondJson(200, uploadJson(job))
