@@ -15,7 +15,6 @@ import threadtools
 import ../config
 import ../draw/overlay
 import ../infer/hailo_worker
-import ../media/convert
 import ../types
 import ./store
 
@@ -47,7 +46,7 @@ proc currentRunner(): JobRunner {.gcsafe.} =
   {.cast(gcsafe).}:
     result = cast[JobRunner](gRunnerPtr)
 
-proc processJob(store: JobStore; jobId: string; workspace: var YoloPreprocessWorkspace) {.gcsafe.} =
+proc processJob(store: JobStore; jobId: string) {.gcsafe.} =
   let maybeJob = store.getJob(jobId)
   if maybeJob.isNone:
     return
@@ -65,7 +64,7 @@ proc processJob(store: JobStore; jobId: string; workspace: var YoloPreprocessWor
 
       var stats: OverlayStats
       {.cast(gcsafe).}:
-        stats = drawHailoOverlay(job.inputPath, job.outputPath, fontPath, workspace)
+        stats = drawHailoOverlay(job.inputPath, job.outputPath, fontPath)
 
       let message = "complete: " & stats.formatOverlayStats()
       echo &"job {jobId}: {message}"
@@ -81,8 +80,6 @@ proc processJob(store: JobStore; jobId: string; workspace: var YoloPreprocessWor
 
 proc jobRunnerMain(state: ptr JobRunnerState) {.thread.} =
   let store = cast[JobStore](state.storePtr)
-
-  var preprocessWorkspace: YoloPreprocessWorkspace
 
   try:
     try:
@@ -105,7 +102,7 @@ proc jobRunnerMain(state: ptr JobRunnerState) {.thread.} =
       of jrkStop:
         break
       of jrkRun:
-        store.processJob(req.jobId, preprocessWorkspace)
+        store.processJob(req.jobId)
   finally:
     {.cast(gcsafe).}:
       closeHailoWorker()

@@ -21,11 +21,18 @@ const
   LabelPadX = 6.float32
   BoxThickness = 4.float32
 
+  ## Keep small and crowded detections readable: draw all boxes, but only
+  ## annotate boxes large enough for a useful label.
+  MinLabelBoxHeight = 64.float32
+  MinLabelBoxArea = 3000.float32
+  MaxLabels = 12
+
 type
   OverlayStats* = object
     imageWidth*: int
     imageHeight*: int
     detections*: int
+    labelsDrawn*: int
     decodeMs*: int
     letterboxMs*: int
     inferMs*: int
@@ -39,7 +46,7 @@ proc elapsedMs(start: float): int =
     result = 0
 
 proc formatOverlayStats*(s: OverlayStats): string =
-  &"detections={s.detections}, image={s.imageWidth}x{s.imageHeight}, total={s.totalMs} ms " &
+  &"detections={s.detections}, labels={s.labelsDrawn}, image={s.imageWidth}x{s.imageHeight}, total={s.totalMs} ms " &
   &"(decode={s.decodeMs}, letterbox={s.letterboxMs}, infer={s.inferMs}, draw={s.drawMs}, encode={s.encodeMs})"
 
 proc clampf(v, lo, hi: float32): float32 =
@@ -98,7 +105,14 @@ proc drawLabel(image: Image; ctx: Context; font: Font; d: Detection) =
     translate(vec2(x + LabelPadX, y + 2.float32))
   )
 
-proc drawDetections*(image: Image; detections: openArray[Detection]; fontPath: string) =
+proc shouldDrawLabel(d: Detection; labelsDrawn: int): bool =
+  if labelsDrawn >= MaxLabels:
+    return false
+
+  let area = d.w * d.h
+  result = d.h >= MinLabelBoxHeight and area >= MinLabelBoxArea
+
+proc drawDetections*(image: Image; detections: openArray[Detection]; fontPath: string): int =
   let ctx = newContext(image)
 
   var font: Font
@@ -110,15 +124,20 @@ proc drawDetections*(image: Image; detections: openArray[Detection]; fontPath: s
     except CatchableError:
       hasFont = false
 
+  var labelsDrawn = 0
+
   for raw in detections:
     let d = raw.clampDetection(image.width, image.height)
     ctx.setClassColor(d.classId)
     ctx.drawStrokeRect(d)
-    if hasFont:
+    if hasFont and d.shouldDrawLabel(labelsDrawn):
       ctx.setClassColor(d.classId)
       image.drawLabel(ctx, font, d)
+      inc labelsDrawn
 
-proc drawHailoOverlay*(inputPath, outputPath, fontPath: string; workspace: var YoloPreprocessWorkspace): OverlayStats =
+  result = labelsDrawn
+
+proc drawHailoOverlay*(inputPath, outputPath, fontPath: string): OverlayStats =
   let totalStart = epochTime()
 
   var stageStart = epochTime()
@@ -129,7 +148,7 @@ proc drawHailoOverlay*(inputPath, outputPath, fontPath: string; workspace: var Y
 
   ## yoloInput.rgb.data is the 640x640 packed RGB/NHWC3 buffer passed to HAILO.
   stageStart = epochTime()
-  let yoloInput = image.prepareYoloInput(workspace)
+  let yoloInput = image.prepareYoloInput()
   result.letterboxMs = elapsedMs(stageStart)
 
   stageStart = epochTime()
@@ -138,7 +157,7 @@ proc drawHailoOverlay*(inputPath, outputPath, fontPath: string; workspace: var Y
   result.detections = detections.len
 
   stageStart = epochTime()
-  image.drawDetections(detections, fontPath)
+  result.labelsDrawn = image.drawDetections(detections, fontPath)
   result.drawMs = elapsedMs(stageStart)
 
   stageStart = epochTime()
@@ -146,9 +165,3 @@ proc drawHailoOverlay*(inputPath, outputPath, fontPath: string; workspace: var Y
   result.encodeMs = elapsedMs(stageStart)
 
   result.totalMs = elapsedMs(totalStart)
-
-
-proc drawHailoOverlay*(inputPath, outputPath, fontPath: string): OverlayStats =
-  ## Compatibility helper for one-shot callers.
-  var workspace: YoloPreprocessWorkspace
-  result = drawHailoOverlay(inputPath, outputPath, fontPath, workspace)
