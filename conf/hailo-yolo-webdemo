@@ -1,0 +1,38 @@
+#!/sbin/openrc-run
+
+name="HAILO YOLO Web Demo"
+description="HAILO-8L YOLOv11s web demo appliance"
+
+command="/usr/local/bin/hailo_yolo_webdemo"
+command_background="yes"
+pidfile="/run/hailo-yolo-webdemo.pid"
+
+output_log="/var/log/hailo-yolo-webdemo.log"
+error_log="/var/log/hailo-yolo-webdemo.log"
+
+depend() {
+    need net
+    use localmount
+    before nginx
+}
+
+start_pre() {
+    checkpath -d -m 1777 /var/tmp/hailo-demo
+    checkpath -d -m 1777 /var/tmp/hailo-demo/upload
+    checkpath -d -m 1777 /var/tmp/hailo-demo/jobs
+    checkpath -d -m 0755 /usr/local/share/hailo-demo
+
+    if [ ! -x "${command}" ]; then
+        eerror "${command} is missing or not executable"
+        return 1
+    fi
+
+    if [ ! -f /usr/local/share/hailo-demo/yolov11s.hef ]; then
+        eerror "/usr/local/share/hailo-demo/yolov11s.hef is missing"
+        return 1
+    fi
+
+    if [ ! -e /dev/hailo0 ] && [ ! -e /dev/hailo ]; then
+        ewarn "HAILO device node was not found. The service may fail until the device is exposed to this instance."
+    fi
+}
