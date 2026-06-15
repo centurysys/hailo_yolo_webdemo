@@ -1,8 +1,8 @@
 ## Thin HailoRT detector wrapper.
 ##
-## This is still a synchronous worker-facing API.  It opens Detector once and
-## reuses output/detection buffers across JPEG jobs.  A later step can move this
-## behind a dedicated threadtools queue without changing draw/overlay.nim.
+## Detector open / HEF load is now exposed through preloadHailoWorker().
+## The background job runner calls it once in its own worker thread before
+## waiting for jobs, so the first upload does not pay the HEF loading cost.
 
 import hailort_nim
 import std/[locks, os, strformat]
@@ -24,24 +24,11 @@ var
   gRawDetections: seq[hailort_nim.Detection]
 
 proc initHailoWorker*() =
-  ## Main calls this during startup.  Keep it idempotent so tests and future
-  ## service reload paths can call it safely.
+  ## Keep this idempotent.  The lock can be initialized by main or by the
+  ## background worker thread.
   if not gLockReady:
     initLock(gLock)
     gLockReady = true
-
-proc closeHailoWorker*() =
-  if not gLockReady:
-    return
-
-  withLock gLock:
-    if not gDetector.isNil:
-      let closeRes = gDetector.close()
-      if closeRes.isErr:
-        echo &"warning: failed to close HAILO detector: {closeRes.error}"
-      gDetector = nil
-      gOutputBuf.setLen(0)
-      gRawDetections.setLen(0)
 
 proc ensureDetector() =
   if not gLockReady:
@@ -64,6 +51,32 @@ proc ensureDetector() =
     gRawDetections = @[]
 
     echo &"HAILO detector opened: inputSize={gDetector.inputSize()} outputSize={gDetector.outputSize()} hef={hefPath}"
+
+proc preloadHailoWorker*() =
+  ## Open the detector and allocate reusable buffers before the first job.
+  ##
+  ## This should be called from the same thread that will later run detectYolo()
+  ## so HailoRT/vstream ownership stays local to the job worker thread.
+  if not gLockReady:
+    initHailoWorker()
+
+  withLock gLock:
+    ensureDetector()
+
+proc closeHailoWorker*() =
+  if not gLockReady:
+    return
+
+  withLock gLock:
+    if not gDetector.isNil:
+      let closeRes = gDetector.close()
+      if closeRes.isErr:
+        echo &"warning: failed to close HAILO detector: {closeRes.error}"
+      else:
+        echo "HAILO detector closed"
+      gDetector = nil
+      gOutputBuf.setLen(0)
+      gRawDetections.setLen(0)
 
 proc detectYolo*(input: YoloInputImage): seq[appTypes.Detection] =
   if input.rgb.data.len == 0:

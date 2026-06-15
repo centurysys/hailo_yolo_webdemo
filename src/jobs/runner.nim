@@ -14,6 +14,7 @@ import threadtools
 
 import ../config
 import ../draw/overlay
+import ../infer/hailo_worker
 import ../types
 import ./store
 
@@ -75,17 +76,31 @@ proc processJob(store: JobStore; jobId: string) {.gcsafe.} =
 proc jobRunnerMain(state: ptr JobRunnerState) {.thread.} =
   let store = cast[JobStore](state.storePtr)
 
-  while true:
-    var recvRes = state.queue.receiveResult()
-    if recvRes.isErr:
-      break
+  try:
+    try:
+      {.cast(gcsafe).}:
+        preloadHailoWorker()
+      echo "HAILO detector preloaded in job worker thread"
+    except CatchableError as e:
+      ## Keep the web UI usable in development environments without HAILO.
+      ## The first JPEG job will retry Detector.open() and then fail with a
+      ## job-specific error if the device/HEF is still unavailable.
+      echo &"warning: failed to preload HAILO detector: {e.msg}"
 
-    var req = recvRes.take()
-    case req.kind
-    of jrkStop:
-      break
-    of jrkRun:
-      store.processJob(req.jobId)
+    while true:
+      var recvRes = state.queue.receiveResult()
+      if recvRes.isErr:
+        break
+
+      var req = recvRes.take()
+      case req.kind
+      of jrkStop:
+        break
+      of jrkRun:
+        store.processJob(req.jobId)
+  finally:
+    {.cast(gcsafe).}:
+      closeHailoWorker()
 
 proc startJobRunner*(store: JobStore; queueSize = DefaultJobQueueSize): JobRunner =
   if store.isNil:
