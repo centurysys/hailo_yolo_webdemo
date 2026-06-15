@@ -1,0 +1,118 @@
+## Pixie based drawing helpers.
+##
+## Step 2 keeps inference dummy-only, but it already exercises the real
+## image-load -> draw overlay -> JPEG encode path.  The HAILO step will later
+## replace demoDetections() with YOLOv11s detections.
+
+import pixie
+import std/[math, os, strformat]
+
+import ../media/jpeg
+import ../types
+
+const
+  LabelFontSize = 18.float32
+  LabelHeight = 24.float32
+  LabelPadX = 6.float32
+  BoxThickness = 4.float32
+
+proc clampf(v, lo, hi: float32): float32 =
+  result = max(lo, min(v, hi))
+
+proc clampDetection(d: Detection; imageW, imageH: int): Detection =
+  let
+    maxX = max(0.float32, imageW.float32 - 1.float32)
+    maxY = max(0.float32, imageH.float32 - 1.float32)
+
+  result = d
+  result.x = clampf(d.x, 0, maxX)
+  result.y = clampf(d.y, 0, maxY)
+  result.w = clampf(d.w, 1, imageW.float32 - result.x)
+  result.h = clampf(d.h, 1, imageH.float32 - result.y)
+
+proc demoDetections*(imageW, imageH: int): seq[Detection] =
+  ## Fixed boxes for bring-up.  They are intentionally scaled by image size so
+  ## a wide range of JPEGs can be used before the real YOLO path is connected.
+  let
+    w = imageW.float32
+    h = imageH.float32
+
+  result = @[
+    Detection(classId: 0, label: "person", score: 0.91.float32,
+      x: w * 0.08.float32, y: h * 0.18.float32,
+      w: w * 0.24.float32, h: h * 0.58.float32),
+    Detection(classId: 16, label: "dog", score: 0.87.float32,
+      x: w * 0.50.float32, y: h * 0.50.float32,
+      w: w * 0.25.float32, h: h * 0.28.float32),
+    Detection(classId: 2, label: "car", score: 0.76.float32,
+      x: w * 0.58.float32, y: h * 0.16.float32,
+      w: w * 0.34.float32, h: h * 0.24.float32)
+  ]
+
+proc setClassColor(ctx: Context; classId: int) =
+  case classId mod 4
+  of 0:
+    ctx.fillStyle = rgba(31, 136, 61, 255)
+  of 1:
+    ctx.fillStyle = rgba(9, 105, 218, 255)
+  of 2:
+    ctx.fillStyle = rgba(191, 135, 0, 255)
+  else:
+    ctx.fillStyle = rgba(130, 80, 223, 255)
+
+proc drawStrokeRect(ctx: Context; d: Detection) =
+  let
+    x = d.x
+    y = d.y
+    w = d.w
+    h = d.h
+    t = min(BoxThickness, min(w, h) / 3.float32)
+
+  ctx.fillRect(rect(vec2(x, y), vec2(w, t)))
+  ctx.fillRect(rect(vec2(x, y + h - t), vec2(w, t)))
+  ctx.fillRect(rect(vec2(x, y), vec2(t, h)))
+  ctx.fillRect(rect(vec2(x + w - t, y), vec2(t, h)))
+
+proc drawLabel(image: Image; ctx: Context; font: Font; d: Detection) =
+  let
+    text = &"{d.label} {int(round(d.score * 100.float32))}%"
+    labelW = max(72.float32, text.len.float32 * 9.float32 + LabelPadX * 2.float32)
+    x = d.x
+    y = if d.y >= LabelHeight + 2.float32: d.y - LabelHeight else: d.y
+
+  ## Background uses the currently selected class color.
+  ctx.fillRect(rect(vec2(x, y), vec2(labelW, LabelHeight)))
+
+  var textFont = font
+  textFont.size = LabelFontSize
+  textFont.paint.color = color(1, 1, 1)
+  image.fillText(
+    textFont.typeset(text, vec2(labelW - LabelPadX * 2.float32, LabelHeight)),
+    translate(vec2(x + LabelPadX, y + 2.float32))
+  )
+
+proc drawDetections*(image: Image; detections: openArray[Detection]; fontPath: string) =
+  let ctx = newContext(image)
+
+  var font: Font
+  var hasFont = false
+  if fontPath.len > 0 and fileExists(fontPath):
+    try:
+      font = readFont(fontPath)
+      hasFont = true
+    except CatchableError:
+      hasFont = false
+
+  for raw in detections:
+    let d = raw.clampDetection(image.width, image.height)
+    ctx.setClassColor(d.classId)
+    ctx.drawStrokeRect(d)
+    if hasFont:
+      ctx.setClassColor(d.classId)
+      image.drawLabel(ctx, font, d)
+
+proc drawDemoOverlay*(inputPath, outputPath, fontPath: string) =
+  var image = readImage(inputPath)
+  let detections = demoDetections(image.width, image.height)
+  image.drawDetections(detections, fontPath)
+  image.encodeImageToJpeg(outputPath)
