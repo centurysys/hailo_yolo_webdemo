@@ -150,23 +150,46 @@
     };
   }
 
-  function drawLabel(text, x, y, maxWidth) {
+  function classColor(det, alpha = 0.92) {
+    const palette = [
+      [31, 136, 61],
+      [9, 105, 218],
+      [191, 135, 0],
+      [130, 80, 223]
+    ];
+    const rawId = Number(det?.classId);
+    const idx = Number.isFinite(rawId) ? ((Math.trunc(rawId) % palette.length) + palette.length) % palette.length : 0;
+    const [r, g, b] = palette[idx];
+    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+  }
+
+  function drawLabel(text, x, y, bgColor, viewportWidth, viewportHeight) {
     const safeText = String(text || '').slice(0, 64);
     if (!safeText) return;
 
     ctx.font = '14px system-ui, sans-serif';
     ctx.textBaseline = 'top';
-    const metrics = ctx.measureText(safeText);
+
     const padX = 5;
     const padY = 3;
-    const labelWidth = Math.min(metrics.width + padX * 2, Math.max(32, maxWidth));
     const labelHeight = 20;
-    const labelY = y >= labelHeight + 2 ? y - labelHeight - 2 : y + 2;
+    const textWidth = Math.ceil(ctx.measureText(safeText).width);
+    const labelWidth = Math.max(32, textWidth + padX * 2);
 
-    ctx.fillStyle = 'rgba(0, 0, 0, 0.72)';
-    ctx.fillRect(x, labelY, labelWidth, labelHeight);
+    let labelX = x;
+    if (Number.isFinite(viewportWidth) && viewportWidth > 0) {
+      labelX = Math.max(0, Math.min(labelX, viewportWidth - labelWidth));
+    }
+
+    let labelY = y >= labelHeight + 2 ? y - labelHeight - 2 : y + 2;
+    if (Number.isFinite(viewportHeight) && viewportHeight > 0) {
+      labelY = Math.max(0, Math.min(labelY, viewportHeight - labelHeight));
+    }
+
+    ctx.fillStyle = bgColor || 'rgba(0, 0, 0, 0.72)';
+    ctx.fillRect(labelX, labelY, labelWidth, labelHeight);
     ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
-    ctx.fillText(safeText, x + padX, labelY + padY, labelWidth - padX * 2);
+    ctx.fillText(safeText, labelX + padX, labelY + padY);
   }
 
   function drawForTime(time) {
@@ -198,7 +221,6 @@
       .slice(0, preset.maxBoxes);
 
     ctx.lineWidth = 3;
-    ctx.strokeStyle = 'rgba(0, 220, 255, 0.92)';
 
     let labelsDrawn = 0;
     for (const det of items) {
@@ -209,12 +231,14 @@
       const h = Math.max(0, Math.min(height - y, box.h));
       if (w <= 1 || h <= 1) continue;
 
+      const color = classColor(det);
+      ctx.strokeStyle = color;
       ctx.strokeRect(x, y, w, h);
 
       if (showLabels && labelsDrawn < preset.maxLabels && Number(det.score) >= preset.minLabelScore) {
         const score = Number(det.score);
         const label = `${det.label || det.classId} ${(score * 100).toFixed(0)}%`;
-        drawLabel(label, x, y, w);
+        drawLabel(label, x, y, color, width, height);
         labelsDrawn += 1;
       }
     }
