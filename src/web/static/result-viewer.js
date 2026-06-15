@@ -8,6 +8,12 @@
   const presetSelect = document.getElementById('iv-overlay-preset');
   const labelsCheckbox = document.getElementById('iv-show-labels');
   const statusText = document.getElementById('iv-status');
+  const playButton = document.getElementById('iv-play');
+  const seekControl = document.getElementById('iv-seek');
+  const timeReadout = document.getElementById('iv-time');
+  const muteButton = document.getElementById('iv-mute');
+  const fullscreenButton = document.getElementById('iv-fullscreen');
+  const videoWrap = root.querySelector('.video-overlay-wrap');
 
   if (!video || !canvas) return;
 
@@ -28,6 +34,7 @@
   let lastCanvasHeight = 0;
   let rafId = 0;
   let rvfcActive = false;
+  let userSeeking = false;
 
   function setStatus(text) {
     if (statusText) statusText.textContent = text;
@@ -40,6 +47,40 @@
   function clearOverlay() {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
     lastDrawnFrame = -1;
+  }
+
+  function finiteDuration() {
+    return Number.isFinite(video.duration) && video.duration > 0;
+  }
+
+  function formatTime(seconds) {
+    if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
+    const total = Math.floor(seconds + 0.5);
+    const h = Math.floor(total / 3600);
+    const m = Math.floor((total % 3600) / 60);
+    const s = total % 60;
+    if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    return `${m}:${String(s).padStart(2, '0')}`;
+  }
+
+  function updatePlaybackUi() {
+    if (playButton) playButton.textContent = video.paused ? 'Play' : 'Pause';
+    if (muteButton) muteButton.textContent = video.muted ? 'Unmute' : 'Mute';
+
+    const durationKnown = finiteDuration();
+    if (seekControl) {
+      seekControl.disabled = !durationKnown;
+      if (durationKnown && !userSeeking) {
+        const pos = Math.max(0, Math.min(1000, Math.round((video.currentTime / video.duration) * 1000)));
+        seekControl.value = String(pos);
+      }
+    }
+
+    if (timeReadout) {
+      const cur = formatTime(video.currentTime || 0);
+      const dur = durationKnown ? formatTime(video.duration) : '0:00';
+      timeReadout.textContent = `${cur} / ${dur}`;
+    }
   }
 
   function resizeCanvas() {
@@ -129,6 +170,8 @@
   }
 
   function drawForTime(time) {
+    updatePlaybackUi();
+
     if (!overlayEnabled || !detections || !resizeCanvas()) {
       if (!overlayEnabled) clearOverlay();
       return;
@@ -219,6 +262,39 @@
     if (!scheduleVideoFrameCallback()) scheduleAnimationFrameLoop();
   }
 
+  function togglePlayback() {
+    if (video.paused || video.ended) {
+      const promise = video.play();
+      if (promise && typeof promise.catch === 'function') {
+        promise.catch((err) => setStatus(`play failed: ${err.message}`));
+      }
+    } else {
+      video.pause();
+    }
+    updatePlaybackUi();
+  }
+
+  function seekFromControl() {
+    if (!seekControl || !finiteDuration()) return;
+    const ratio = Math.max(0, Math.min(1, Number(seekControl.value) / 1000));
+    video.currentTime = ratio * video.duration;
+    redraw();
+    updatePlaybackUi();
+  }
+
+  function toggleFullscreen() {
+    const target = root;
+    if (document.fullscreenElement) {
+      document.exitFullscreen?.();
+      return;
+    }
+    if (target.requestFullscreen) {
+      target.requestFullscreen().catch((err) => setStatus(`fullscreen failed: ${err.message}`));
+    } else if (videoWrap?.webkitRequestFullscreen) {
+      videoWrap.webkitRequestFullscreen();
+    }
+  }
+
   toggleButton?.addEventListener('click', () => {
     overlayEnabled = !overlayEnabled;
     toggleButton.textContent = overlayEnabled ? 'Overlay: ON' : 'Overlay: OFF';
@@ -228,14 +304,50 @@
 
   presetSelect?.addEventListener('change', redraw);
   labelsCheckbox?.addEventListener('change', redraw);
+  playButton?.addEventListener('click', togglePlayback);
+  video.addEventListener('click', togglePlayback);
+  muteButton?.addEventListener('click', () => {
+    video.muted = !video.muted;
+    updatePlaybackUi();
+  });
+  fullscreenButton?.addEventListener('click', toggleFullscreen);
+  seekControl?.addEventListener('input', () => {
+    userSeeking = true;
+    seekFromControl();
+  });
+  seekControl?.addEventListener('change', () => {
+    seekFromControl();
+    userSeeking = false;
+  });
+  seekControl?.addEventListener('pointerup', () => {
+    userSeeking = false;
+    updatePlaybackUi();
+  });
+  seekControl?.addEventListener('keyup', () => {
+    userSeeking = false;
+    updatePlaybackUi();
+  });
+
   video.addEventListener('loadedmetadata', redraw);
+  video.addEventListener('durationchange', updatePlaybackUi);
+  video.addEventListener('play', () => {
+    updatePlaybackUi();
+    startDrawLoop();
+  });
+  video.addEventListener('pause', () => {
+    updatePlaybackUi();
+    redraw();
+  });
+  video.addEventListener('ended', updatePlaybackUi);
   video.addEventListener('seeked', redraw);
-  video.addEventListener('pause', redraw);
-  video.addEventListener('play', startDrawLoop);
   video.addEventListener('timeupdate', () => {
+    updatePlaybackUi();
     if (video.paused) redraw();
   });
   window.addEventListener('resize', redraw);
+  document.addEventListener('fullscreenchange', redraw);
+
+  updatePlaybackUi();
 
   fetch(detectionsUrl, { cache: 'no-store' })
     .then((res) => {

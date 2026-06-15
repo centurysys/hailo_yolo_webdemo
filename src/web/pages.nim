@@ -98,8 +98,15 @@ proc renderResultPage*(job: JobInfo): string =
         </label>
         <span id="iv-status" class="muted viewer-status">loading detections...</span>
       </div>
+      <div class="viewer-playback-toolbar" aria-label="Interactive video playback controls">
+        <button id="iv-play" type="button">Play</button>
+        <input id="iv-seek" class="seek-control" type="range" min="0" max="1000" step="1" value="0" aria-label="Seek position" disabled>
+        <span id="iv-time" class="time-readout">0:00 / 0:00</span>
+        <button id="iv-mute" class="secondary" type="button">Mute</button>
+        <button id="iv-fullscreen" class="secondary" type="button">Fullscreen</button>
+      </div>
       <div class="video-overlay-wrap">
-        <video id="iv-video" class="result-media" controls preload="metadata" src="/job-media/{safeJobId}/input.mp4"></video>
+        <video id="iv-video" class="result-media" preload="metadata" playsinline src="/job-media/{safeJobId}/input.mp4"></video>
         <canvas id="iv-canvas" class="overlay-canvas" aria-hidden="true"></canvas>
       </div>
     </div>

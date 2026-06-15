@@ -49,14 +49,37 @@ progress { width: 100%; height: 1rem; }
 
 /* Interactive result viewer */
 .interactive-viewer { overflow: hidden; }
-.viewer-toolbar {
+.viewer-toolbar,
+.viewer-playback-toolbar {
   display: flex;
   flex-wrap: wrap;
   gap: 0.75rem;
   align-items: center;
   margin: 0.8rem 0;
 }
-.viewer-toolbar button { margin: 0; }
+.viewer-toolbar button,
+.viewer-playback-toolbar button { margin: 0; }
+.viewer-playback-toolbar {
+  padding: 0.7rem;
+  border: 1px solid color-mix(in srgb, CanvasText 14%, Canvas);
+  border-radius: 0.55rem;
+  background: color-mix(in srgb, CanvasText 4%, Canvas);
+}
+.seek-control {
+  flex: 1 1 16rem;
+  min-width: 10rem;
+}
+.time-readout {
+  min-width: 7.5rem;
+  text-align: center;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+button.secondary {
+  border-color: color-mix(in srgb, #0969da 45%, CanvasText);
+  background: color-mix(in srgb, #0969da 12%, Canvas);
+  color: CanvasText;
+}
 .compact-control {
   display: flex;
   gap: 0.45rem;
@@ -88,8 +111,11 @@ progress { width: 100%; height: 1rem; }
   pointer-events: none;
 }
 @media (max-width: 720px) {
-  .viewer-toolbar { align-items: stretch; }
+  .viewer-toolbar,
+  .viewer-playback-toolbar { align-items: stretch; }
   .compact-control { width: 100%; justify-content: space-between; }
   .compact-control select { min-width: 0; flex: 1; }
   .viewer-status { width: 100%; }
+  .seek-control { flex-basis: 100%; order: 2; }
+  .time-readout { min-width: 0; text-align: left; }
 }
