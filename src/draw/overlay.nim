@@ -1,13 +1,14 @@
 ## Pixie based drawing helpers.
 ##
-## Step 2 keeps inference dummy-only, but it already exercises the real
-## image-load -> draw overlay -> JPEG encode path.  The HAILO step will later
-## replace demoDetections() with YOLOv11s detections.
+## This step still uses dummy detections, but it now creates the real 640x640
+## RGB/NHWC YOLO input buffer with libyuv_nim before restoring dummy bboxes from
+## model-input coordinates into original-image coordinates.
 
 import pixie
 import std/[math, os, strformat]
 
-import ../media/jpeg
+import ../infer/yolo
+import ../media/[convert, jpeg]
 import ../types
 
 const
@@ -29,25 +30,6 @@ proc clampDetection(d: Detection; imageW, imageH: int): Detection =
   result.y = clampf(d.y, 0, maxY)
   result.w = clampf(d.w, 1, imageW.float32 - result.x)
   result.h = clampf(d.h, 1, imageH.float32 - result.y)
-
-proc demoDetections*(imageW, imageH: int): seq[Detection] =
-  ## Fixed boxes for bring-up.  They are intentionally scaled by image size so
-  ## a wide range of JPEGs can be used before the real YOLO path is connected.
-  let
-    w = imageW.float32
-    h = imageH.float32
-
-  result = @[
-    Detection(classId: 0, label: "person", score: 0.91.float32,
-      x: w * 0.08.float32, y: h * 0.18.float32,
-      w: w * 0.24.float32, h: h * 0.58.float32),
-    Detection(classId: 16, label: "dog", score: 0.87.float32,
-      x: w * 0.50.float32, y: h * 0.50.float32,
-      w: w * 0.25.float32, h: h * 0.28.float32),
-    Detection(classId: 2, label: "car", score: 0.76.float32,
-      x: w * 0.58.float32, y: h * 0.16.float32,
-      w: w * 0.34.float32, h: h * 0.24.float32)
-  ]
 
 proc setClassColor(ctx: Context; classId: int) =
   case classId mod 4
@@ -113,6 +95,11 @@ proc drawDetections*(image: Image; detections: openArray[Detection]; fontPath: s
 
 proc drawDemoOverlay*(inputPath, outputPath, fontPath: string) =
   var image = readImage(inputPath)
-  let detections = demoDetections(image.width, image.height)
+
+  ## Exercise the real libyuv_nim path.  yoloInput.rgb.data is the future
+  ## HAILO input buffer: 640x640 packed RGB/NHWC3.
+  let yoloInput = image.prepareYoloInput()
+  let detections = demoDetectionsForLetterbox(yoloInput.info)
+
   image.drawDetections(detections, fontPath)
   image.encodeImageToJpeg(outputPath)
