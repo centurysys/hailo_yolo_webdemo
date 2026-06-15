@@ -3,7 +3,7 @@
 ## This is intentionally simple.  Jobs live under /var/tmp and disappear on
 ## reboot, which matches the demo appliance design.
 
-import std/[locks, options, tables, times]
+import std/[algorithm, locks, options, tables, times]
 
 import ../types
 
@@ -88,3 +88,39 @@ proc listJobs*(store: JobStore): seq[JobInfo] =
   withLock store.lock:
     for _, job in store.jobs:
       result.add(job)
+
+
+proc pruneOldFinishedJobs*(store: JobStore; keep: int): seq[JobInfo] =
+  ## Remove old done/failed jobs from the in-memory index and return the removed
+  ## entries so the caller can delete their filesystem directories.
+  ##
+  ## Queued/running jobs are never removed.  If many active jobs exist, the store
+  ## can temporarily exceed `keep` until those jobs finish.
+  let keepCount = max(keep, 0)
+  var candidates: seq[JobInfo]
+
+  withLock store.lock:
+    if store.jobs.len <= keepCount:
+      return
+
+    for _, job in store.jobs:
+      if job.status in {jsDone, jsFailed}:
+        candidates.add(job)
+
+    if candidates.len == 0:
+      return
+
+    candidates.sort(proc(a, b: JobInfo): int =
+      result = cmp(a.createdAtUnix, b.createdAtUnix)
+      if result == 0:
+        result = cmp(a.id, b.id)
+    )
+
+    var remaining = store.jobs.len
+    for job in candidates:
+      if remaining <= keepCount:
+        break
+      if job.id in store.jobs:
+        store.jobs.del(job.id)
+        result.add(job)
+        dec remaining

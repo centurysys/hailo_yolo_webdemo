@@ -46,6 +46,20 @@ proc currentRunner(): JobRunner {.gcsafe.} =
   {.cast(gcsafe).}:
     result = cast[JobRunner](gRunnerPtr)
 
+proc cleanupOldJobDirs(store: JobStore) {.gcsafe.} =
+  let removedJobs = store.pruneOldFinishedJobs(maxJobsToKeep)
+  if removedJobs.len == 0:
+    return
+
+  for job in removedJobs:
+    let dir = jobsDir / job.id
+    try:
+      if dirExists(dir):
+        removeDir(dir)
+        echo &"removed old job directory: {dir}"
+    except OSError as e:
+      echo &"warning: failed to remove old job directory {dir}: {e.msg}"
+
 proc processJob(store: JobStore; jobId: string) {.gcsafe.} =
   let maybeJob = store.getJob(jobId)
   if maybeJob.isNone:
@@ -109,6 +123,7 @@ proc jobRunnerMain(state: ptr JobRunnerState) {.thread.} =
         break
       of jrkRun:
         store.processJob(req.jobId)
+        store.cleanupOldJobDirs()
   finally:
     {.cast(gcsafe).}:
       closeHailoWorker()

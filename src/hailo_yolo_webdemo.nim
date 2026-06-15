@@ -21,6 +21,10 @@ when isMainModule:
   randomize()
 
   ensureWorkDirs(workRoot, uploadDir, jobsDir)
+  let removedOldJobDirs = cleanupJobDirs(jobsDir)
+  if removedOldJobDirs > 0:
+    echo "removed old job directories at startup: ", removedOldJobDirs
+
   let jobStore = newJobStore()
   let jobRunner = startJobRunner(jobStore)
 

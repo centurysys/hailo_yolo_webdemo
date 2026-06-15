@@ -61,3 +61,27 @@ proc moveOrCopyFile*(src, dst: string) =
   except OSError:
     copyFile(src, dst)
     removeFile(src)
+
+
+proc cleanupJobDirs*(jobsDir: string): int =
+  ## Remove leftover job directories from a previous process lifetime.
+  ##
+  ## Job metadata is in-memory only, so after a restart these directories are no
+  ## longer reachable from the web UI.  Cleaning them at startup prevents tmpfs
+  ## usage from growing while iterating on the demo.
+  if not dirExists(jobsDir):
+    return 0
+
+  for kind, path in walkDir(jobsDir):
+    case kind
+    of pcDir:
+      try:
+        removeDir(path)
+        inc result
+      except OSError as e:
+        echo "warning: failed to remove old job dir ", path, ": ", e.msg
+    else:
+      try:
+        removeFile(path)
+      except OSError as e:
+        echo "warning: failed to remove old job file ", path, ": ", e.msg
