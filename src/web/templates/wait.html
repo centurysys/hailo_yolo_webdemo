@@ -4,6 +4,11 @@
   <progress id="progress" value="0" max="100"></progress>
   <p id="status" class="muted">queued</p>
 
+  <p id="live-viewer-row" class="row result-actions" hidden>
+    <a id="live-viewer-link" href="/result/{{JOB_ID}}">Open live interactive viewer</a>
+    <span class="muted">元動画を再生しながら、処理済み範囲の検出結果を重ねて確認できます。</span>
+  </p>
+
   <section id="preview-card" class="preview-card" hidden>
     <h3>Preview frame</h3>
     <p class="muted">A single annotated preview frame appears here once it becomes available.</p>
