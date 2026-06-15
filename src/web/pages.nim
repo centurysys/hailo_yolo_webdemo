@@ -78,10 +78,30 @@ proc renderResultPage*(job: JobInfo): string =
         &"""
   {previewBlock}
   <section class="media-grid" aria-label="MP4 result viewers">
-    <div class="media-card">
-      <h3>Original video</h3>
-      <p class="muted">アップロードされた元動画です。次のステップでここに検出結果を重ねます。</p>
-      <video class="result-media" controls preload="metadata" src="/job-media/{safeJobId}/input.mp4"></video>
+    <div id="interactive-viewer" class="media-card interactive-viewer" data-job-id="{safeJobId}" data-detections-url="/job-media/{safeJobId}/detections.json">
+      <h3>Interactive viewer</h3>
+      <p class="muted">元動画の上に保存済みのHAILO検出結果を重ねます。Overlayを切り替えると、元動画と検出結果をその場で比較できます。</p>
+      <div class="viewer-toolbar" aria-label="Interactive overlay controls">
+        <button id="iv-overlay-toggle" class="secondary" type="button">Overlay: ON</button>
+        <label class="compact-control">
+          <span>Amount</span>
+          <select id="iv-overlay-preset">
+            <option value="light">Light</option>
+            <option value="balanced" selected>Balanced</option>
+            <option value="rich">Rich</option>
+            <option value="boxes-only">Boxes only</option>
+          </select>
+        </label>
+        <label class="checkbox-control">
+          <input id="iv-show-labels" type="checkbox" checked>
+          <span>Labels</span>
+        </label>
+        <span id="iv-status" class="muted viewer-status">loading detections...</span>
+      </div>
+      <div class="video-overlay-wrap">
+        <video id="iv-video" class="result-media" controls preload="metadata" src="/job-media/{safeJobId}/input.mp4"></video>
+        <canvas id="iv-canvas" class="overlay-canvas" aria-hidden="true"></canvas>
+      </div>
     </div>
     <div class="media-card">
       <h3>Generated overlay MP4</h3>
@@ -124,7 +144,13 @@ proc renderResultPage*(job: JobInfo): string =
     .replaceToken("DOWNLOAD_LINK", downloadLink)
     .replaceToken("DETECTIONS_LINK", detectionsLink)
 
-  renderLayout("Result", body)
+  let scriptPath =
+    if job.status == jsDone and job.kind == jkMp4:
+      "/static/result-viewer.js"
+    else:
+      ""
+
+  renderLayout("Result", body, scriptPath)
 
 proc renderErrorPage*(message: string): string =
   let body = errorTemplate.replaceToken("MESSAGE", message.htmlEscape)
