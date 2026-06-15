@@ -66,6 +66,20 @@ proc trailingPathSegment(path, prefix: string): string =
     result = ""
   result = result.strip(chars = {'/'})
 
+proc outputContentType(job: JobInfo): string =
+  let ext = job.outputPath.splitFile.ext.toLowerAscii()
+  case ext
+  of ".jpg", ".jpeg": "image/jpeg"
+  of ".mp4", ".m4v": "video/mp4"
+  else: job.kind.contentType
+
+proc outputFilename(job: JobInfo): string =
+  let ext = job.outputPath.splitFile.ext.toLowerAscii()
+  if job.kind == jkMp4 and ext in [".jpg", ".jpeg"]:
+    "preview.jpg"
+  else:
+    "output" & job.kind.extension
+
 proc handleIndex*(request: Request) {.gcsafe.} =
   request.respondHtml(200, renderIndexPage())
 
@@ -174,8 +188,8 @@ proc handleFile*(request: Request) {.gcsafe.} =
     return
 
   var headers: HttpHeaders
-  headers["Content-Type"] = job.kind.contentType
-  headers["Content-Disposition"] = &"inline; filename=\"output{job.kind.extension}\""
+  headers["Content-Type"] = job.outputContentType
+  headers["Content-Disposition"] = &"inline; filename=\"{job.outputFilename}\""
   request.respond(200, headers, readFile(job.outputPath))
 
 proc handleNotFound*(request: Request) {.gcsafe.} =

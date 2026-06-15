@@ -1,18 +1,14 @@
 ## Pixie based drawing helpers.
 ##
-## JPEG jobs generate the real 640x640 RGB/NHWC YOLO input buffer, run
-## HAILO YOLOv11s inference, restore boxes to original image coordinates, and
-## draw bbox/label overlays.
-##
-## This module also measures the expensive stages so the web demo can show
-## whether time is spent in JPEG decode/encode, preprocessing, HAILO inference,
-## or drawing.
+## JPEG jobs generate the 640x640 RGB/NHWC YOLO input buffer from TurboJPEG
+## decoded RGBX pixels. MP4 preview jobs decode one I420 frame via libav_nim and
+## build the YOLO input directly from that I420 frame.
 
 import pixie
 import std/[math, os, strformat, times]
 
 import ../infer/hailo_worker
-import ../media/[convert, jpeg]
+import ../media/[convert, jpeg, mp4]
 import ../types
 
 const
@@ -137,31 +133,59 @@ proc drawDetections*(image: Image; detections: openArray[Detection]; fontPath: s
 
   result = labelsDrawn
 
+proc finishOverlay(
+    image: var Image;
+    yoloInput: YoloInputImage;
+    outputPath, fontPath: string;
+    stats: var OverlayStats;
+    totalStart: float
+  ) =
+  stats.imageWidth = image.width
+  stats.imageHeight = image.height
+
+  var stageStart = epochTime()
+  let detections = yoloInput.detectYolo()
+  stats.inferMs = elapsedMs(stageStart)
+  stats.detections = detections.len
+
+  stageStart = epochTime()
+  stats.labelsDrawn = image.drawDetections(detections, fontPath)
+  stats.drawMs += elapsedMs(stageStart)
+
+  stageStart = epochTime()
+  image.encodeImageToJpeg(outputPath)
+  stats.encodeMs = elapsedMs(stageStart)
+
+  stats.totalMs = elapsedMs(totalStart)
+
 proc drawHailoOverlay*(inputPath, outputPath, fontPath: string): OverlayStats =
   let totalStart = epochTime()
 
   var stageStart = epochTime()
   var image = readJpegToPixieImage(inputPath)
   result.decodeMs = elapsedMs(stageStart)
-  result.imageWidth = image.width
-  result.imageHeight = image.height
 
   ## yoloInput.rgb.data is the 640x640 packed RGB/NHWC3 buffer passed to HAILO.
   stageStart = epochTime()
   let yoloInput = image.prepareYoloInput()
   result.letterboxMs = elapsedMs(stageStart)
 
-  stageStart = epochTime()
-  let detections = yoloInput.detectYolo()
-  result.inferMs = elapsedMs(stageStart)
-  result.detections = detections.len
+  image.finishOverlay(yoloInput, outputPath, fontPath, result, totalStart)
 
-  stageStart = epochTime()
-  result.labelsDrawn = image.drawDetections(detections, fontPath)
-  result.drawMs = elapsedMs(stageStart)
+proc drawMp4PreviewOverlay*(inputPath, outputPath, fontPath: string): OverlayStats =
+  ## Decode one MP4 frame with libav_nim and render it as a JPEG preview with
+  ## HAILO detections.
+  ##
+  ## Timing mapping:
+  ##   decode    : libav open/read first decoded I420 frame
+  ##   letterbox : I420 -> 640x640 RGB24 YOLO input
+  ##   draw      : I420 -> full-size RGBX preview + bbox/label drawing
+  let totalStart = epochTime()
 
-  stageStart = epochTime()
-  image.encodeImageToJpeg(outputPath)
-  result.encodeMs = elapsedMs(stageStart)
+  let preview = decodeMp4PreviewFrame(inputPath)
+  var image = preview.image
+  result.decodeMs = preview.decodeMs
+  result.letterboxMs = preview.letterboxMs
+  result.drawMs = preview.rgbxMs
 
-  result.totalMs = elapsedMs(totalStart)
+  image.finishOverlay(preview.yoloInput, outputPath, fontPath, result, totalStart)

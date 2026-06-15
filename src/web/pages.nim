@@ -3,7 +3,7 @@
 ## Pico CSS will be served by nginx later.  For standalone development, this
 ## module also serves a small built-in CSS file at /static/demo.css.
 
-import std/strformat
+import std/[os, strformat, strutils]
 
 import ../types
 
@@ -60,9 +60,9 @@ proc renderIndexPage*(): string =
   let body = """
 <article>
   <h2>Upload</h2>
-  <p class="muted">JPEGをアップロードすると、background job worker が HAILO-8L上のYOLOv11sで検出し、bbox/label付きのJPEGを生成します。完了メッセージには decode / letterbox / infer / draw / encode の計測値を表示します。MP4はまだcopy-throughです。</p>
+  <p class="muted">JPEGはそのままHAILO-8L上のYOLOv11sで検出し、bbox/label付きJPEGを生成します。MP4は最初の動画ステップとして代表フレーム1枚をJPEG previewとして抽出し、同じ推論・overlay処理を行います。</p>
   <form id="upload-form">
-    <input id="file" type="file" accept=".jpg,.jpeg,.mp4" required>
+    <input id="file" type="file" accept=".jpg,.jpeg,.mp4,.m4v" required>
     <button id="run" type="submit">Upload and Run</button>
   </form>
   <p id="message" class="muted"></p>
@@ -129,13 +129,16 @@ poll();
 """
   renderLayout("Processing", body)
 
+proc isImageOutput(job: JobInfo): bool =
+  let ext = job.outputPath.splitFile.ext.toLowerAscii()
+  ext in [".jpg", ".jpeg"]
+
 proc renderResultPage*(job: JobInfo): string =
   let media =
     if job.status == jsDone:
-      case job.kind
-      of jkJpeg:
+      if job.isImageOutput:
         &"<img class=\"result-media\" src=\"/files/{job.id.htmlEscape}\" alt=\"result\">"
-      of jkMp4:
+      else:
         &"<video class=\"result-media\" controls src=\"/files/{job.id.htmlEscape}\"></video>"
     else:
       &"<p class=\"error\">{job.message.htmlEscape}</p>"

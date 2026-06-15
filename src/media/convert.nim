@@ -2,10 +2,15 @@
 ##
 ## This module owns the YOLOv11s input image preparation path:
 ##
-##   Pixie RGBA image
-##     -> libyuv_nim RgbaImage view/copy
-##     -> libyuv_nim toRgbLetterbox()
-##     -> 640x640 packed RGB input buffer
+##   JPEG path:
+##     Pixie RGBX image
+##       -> libyuv_nim RGBA/RGBX view
+##       -> 640x640 packed RGB input buffer
+##
+##   MP4 path:
+##     libav_nim borrowed I420/YUV420P frame
+##       -> libyuv_nim I420 view
+##       -> 640x640 packed RGB input buffer
 ##
 ## The returned LetterboxInfo is also used to restore YOLO input-space bboxes
 ## back into the original image coordinate space.
@@ -13,6 +18,7 @@
 import pixie
 import std/strformat
 
+import libav_nim
 import libyuv_nim
 
 import ../types
@@ -102,6 +108,28 @@ proc pixieToLibyuvRgbaView*(image: Image): RgbaView =
     data: cast[ptr uint8](unsafeAddr image.data[0])
   )
 
+proc yuv420ToLibyuvI420View*(frame: Yuv420FrameView): I420View =
+  ## Borrow libav_nim's decoded I420/YUV420P frame as a libyuv_nim I420 view.
+  ##
+  ## No image data is copied here. The caller must keep the decoder frame alive
+  ## while libyuv operates on this view.
+  if not frame.hasUsableYuv420Planes():
+    raise newException(
+      ValueError,
+      &"decoded frame is not usable I420: {frame.width}x{frame.height} {frame.format.pixelFormatName()}"
+    )
+
+  result = I420View(
+    width: frame.width,
+    height: frame.height,
+    strideY: frame.yStride,
+    strideU: frame.uStride,
+    strideV: frame.vStride,
+    y: cast[ptr uint8](frame.y),
+    u: cast[ptr uint8](frame.u),
+    v: cast[ptr uint8](frame.v)
+  )
+
 proc rgbImageView(image: var RgbImage): RgbView =
   result = RgbView(
     width: image.width,
@@ -111,12 +139,7 @@ proc rgbImageView(image: var RgbImage): RgbView =
   )
 
 proc prepareYoloInput*(image: Image): YoloInputImage =
-  ## Generate a 640x640 RGB24/NHWC3 YOLO input image using libyuv_nim.
-  ##
-  ## This version borrows Pixie's RGBX/RGBA backing buffer directly instead of
-  ## copying it into a temporary libyuv_nim RgbaImage first.  This is especially
-  ## useful after TurboJPEG decode, where the JPEG decoder buffer is moved into
-  ## Pixie without copying.
+  ## Generate a 640x640 RGB24/NHWC3 YOLO input image from a Pixie RGBX image.
   let srcView = image.pixieToLibyuvRgbaView()
 
   let allocRes = allocRgbImage(YoloInputW, YoloInputH)
@@ -127,6 +150,35 @@ proc prepareYoloInput*(image: Image): YoloInputImage =
   var dstView = dst.rgbImageView()
   let lbRes = srcView.toRgbLetterboxInto(
     dstView,
+    RgbPadColor(r: YoloPadValue, g: YoloPadValue, b: YoloPadValue)
+  )
+  if lbRes.isErr:
+    raise newException(ValueError, $lbRes.error)
+
+  result = YoloInputImage(
+    rgb: dst,
+    info: lbRes.get().toYoloInfo()
+  )
+
+proc prepareYoloInput*(frame: Yuv420FrameView): YoloInputImage =
+  ## Generate a 640x640 RGB24/NHWC3 YOLO input image directly from a decoded
+  ## I420/YUV420P video frame.
+  ##
+  ## This avoids MP4 -> JPEG -> TurboJPEG -> RGBX round-tripping and uses
+  ## libyuv's I420 scaling/conversion path directly.
+  let srcView = frame.yuv420ToLibyuvI420View()
+
+  let allocRes = allocRgbImage(YoloInputW, YoloInputH)
+  if allocRes.isErr:
+    raise newException(ValueError, $allocRes.error)
+
+  var dst = allocRes.get()
+  var dstView = dst.rgbImageView()
+  var scratch: I420Image
+  let lbRes = toRgbLetterboxInto(
+    srcView,
+    dstView,
+    scratch,
     RgbPadColor(r: YoloPadValue, g: YoloPadValue, b: YoloPadValue)
   )
   if lbRes.isErr:

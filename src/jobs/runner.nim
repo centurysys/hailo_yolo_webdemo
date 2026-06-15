@@ -71,9 +71,15 @@ proc processJob(store: JobStore; jobId: string) {.gcsafe.} =
       store.setDone(jobId, message)
 
     of jkMp4:
-      store.updateJob(jobId, jsRunning, 35, "dummy copy-through for MP4")
-      copyFile(job.inputPath, job.outputPath)
-      store.setDone(jobId, "dummy complete: copied input to output")
+      store.updateJob(jobId, jsRunning, 20, "decoding MP4 preview frame with libav_nim")
+
+      var stats: OverlayStats
+      {.cast(gcsafe).}:
+        stats = drawMp4PreviewOverlay(job.inputPath, job.outputPath, fontPath)
+
+      let message = "complete: mp4 preview via libav_nim; " & stats.formatOverlayStats()
+      echo &"job {jobId}: {message}"
+      store.setDone(jobId, message)
 
   except CatchableError as e:
     store.setFailed(jobId, e.msg)
