@@ -43,6 +43,15 @@ type
     rgb*: RgbImage
     info*: YoloLetterboxInfo
 
+  YoloPreprocessWorkspace* = object
+    ## Reusable buffers for the worker-thread preprocessing path.
+    ##
+    ## `rgb` is the fixed 640x640 RGB24 HAILO input image.
+    ## `scratchRgba` is resized to the current letterbox image area, for example
+    ## 640x360 for a 1920x1080 input image.
+    rgb*: RgbImage
+    scratchRgba*: RgbaImage
+
 proc toYoloInfo(info: libyuv_nim.LetterboxInfo): YoloLetterboxInfo =
   result = YoloLetterboxInfo(
     origW: info.srcWidth,
@@ -110,32 +119,48 @@ proc rgbImageView(image: var RgbImage): RgbView =
     data: if image.data.len == 0: nil else: addr image.data[0]
   )
 
-proc prepareYoloInput*(image: Image): YoloInputImage =
-  ## Generate a 640x640 RGB24/NHWC3 YOLO input image using libyuv_nim.
-  ##
-  ## This version borrows Pixie's RGBX/RGBA backing buffer directly instead of
-  ## copying it into a temporary libyuv_nim RgbaImage first.  This is especially
-  ## useful after TurboJPEG decode, where the JPEG decoder buffer is moved into
-  ## Pixie without copying.
-  let srcView = image.pixieToLibyuvRgbaView()
+proc ensureYoloPreprocessWorkspace*(workspace: var YoloPreprocessWorkspace) =
+  if workspace.rgb.isValid and
+      workspace.rgb.width == YoloInputW and
+      workspace.rgb.height == YoloInputH:
+    return
 
   let allocRes = allocRgbImage(YoloInputW, YoloInputH)
   if allocRes.isErr:
     raise newException(ValueError, $allocRes.error)
 
-  var dst = allocRes.get()
-  var dstView = dst.rgbImageView()
+  workspace.rgb = allocRes.get()
+
+proc prepareYoloInput*(image: Image; workspace: var YoloPreprocessWorkspace): YoloInputImage =
+  ## Generate a 640x640 RGB24/NHWC3 YOLO input image using reusable buffers.
+  ##
+  ## This avoids allocating the destination HAILO input buffer and the libyuv
+  ## RGBA scratch image for every uploaded JPEG.  The scratch image is still
+  ## resized automatically if the input aspect ratio changes.
+  let srcView = image.pixieToLibyuvRgbaView()
+  workspace.ensureYoloPreprocessWorkspace()
+
+  var dstView = workspace.rgb.rgbImageView()
   let lbRes = srcView.toRgbLetterboxInto(
     dstView,
+    workspace.scratchRgba,
     RgbPadColor(r: YoloPadValue, g: YoloPadValue, b: YoloPadValue)
   )
   if lbRes.isErr:
     raise newException(ValueError, $lbRes.error)
 
   result = YoloInputImage(
-    rgb: dst,
+    rgb: workspace.rgb,
     info: lbRes.get().toYoloInfo()
   )
+
+proc prepareYoloInput*(image: Image): YoloInputImage =
+  ## Compatibility helper for one-shot callers.
+  ##
+  ## Worker-thread code should prefer the overload that accepts
+  ## YoloPreprocessWorkspace so buffers are reused across jobs.
+  var workspace: YoloPreprocessWorkspace
+  result = image.prepareYoloInput(workspace)
 
 proc inputBufferLen*(input: YoloInputImage): int =
   input.rgb.data.len

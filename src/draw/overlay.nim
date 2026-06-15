@@ -118,7 +118,7 @@ proc drawDetections*(image: Image; detections: openArray[Detection]; fontPath: s
       ctx.setClassColor(d.classId)
       image.drawLabel(ctx, font, d)
 
-proc drawHailoOverlay*(inputPath, outputPath, fontPath: string): OverlayStats =
+proc drawHailoOverlay*(inputPath, outputPath, fontPath: string; workspace: var YoloPreprocessWorkspace): OverlayStats =
   let totalStart = epochTime()
 
   var stageStart = epochTime()
@@ -129,7 +129,7 @@ proc drawHailoOverlay*(inputPath, outputPath, fontPath: string): OverlayStats =
 
   ## yoloInput.rgb.data is the 640x640 packed RGB/NHWC3 buffer passed to HAILO.
   stageStart = epochTime()
-  let yoloInput = image.prepareYoloInput()
+  let yoloInput = image.prepareYoloInput(workspace)
   result.letterboxMs = elapsedMs(stageStart)
 
   stageStart = epochTime()
@@ -146,3 +146,9 @@ proc drawHailoOverlay*(inputPath, outputPath, fontPath: string): OverlayStats =
   result.encodeMs = elapsedMs(stageStart)
 
   result.totalMs = elapsedMs(totalStart)
+
+
+proc drawHailoOverlay*(inputPath, outputPath, fontPath: string): OverlayStats =
+  ## Compatibility helper for one-shot callers.
+  var workspace: YoloPreprocessWorkspace
+  result = drawHailoOverlay(inputPath, outputPath, fontPath, workspace)
