@@ -90,12 +90,21 @@ proc listJobs*(store: JobStore): seq[JobInfo] =
       result.add(job)
 
 
-proc pruneOldFinishedJobs*(store: JobStore; keep: int): seq[JobInfo] =
+proc pruneOldFinishedJobs*(
+  store: JobStore;
+  keep: int;
+  protectedId = ""
+): seq[JobInfo] =
   ## Remove old done/failed jobs from the in-memory index and return the removed
   ## entries so the caller can delete their filesystem directories.
   ##
   ## Queued/running jobs are never removed.  If many active jobs exist, the store
   ## can temporarily exceed `keep` until those jobs finish.
+  ##
+  ## `protectedId` is kept even when it is already done/failed.  This is useful
+  ## immediately after a long-running job completes: the result page may be
+  ## polling that exact job, so pruning it in the same worker turn makes the UI
+  ## show "job not found" even though the output file was just produced.
   let keepCount = max(keep, 0)
   var candidates: seq[JobInfo]
 
@@ -104,6 +113,8 @@ proc pruneOldFinishedJobs*(store: JobStore; keep: int): seq[JobInfo] =
       return
 
     for _, job in store.jobs:
+      if job.id == protectedId:
+        continue
       if job.status in {jsDone, jsFailed}:
         candidates.add(job)
 
@@ -120,6 +131,8 @@ proc pruneOldFinishedJobs*(store: JobStore; keep: int): seq[JobInfo] =
     for job in candidates:
       if remaining <= keepCount:
         break
+      if job.id == protectedId:
+        continue
       if job.id in store.jobs:
         store.jobs.del(job.id)
         result.add(job)

@@ -60,7 +60,7 @@ proc renderIndexPage*(): string =
   let body = """
 <article>
   <h2>Upload</h2>
-  <p class="muted">JPEGはそのままHAILO-8L上のYOLOv11sで検出し、bbox/label付きJPEGを生成します。MP4は最初の動画ステップとして代表フレーム1枚をJPEG previewとして抽出し、同じ推論・overlay処理を行います。</p>
+  <p class="muted">JPEGはHAILO-8L上のYOLOv11sで検出し、bbox/label付きJPEGを生成します。MP4は各フレームにYOLO検出結果をoverlayし、bbox/label付きH.264/MP4を生成します。</p>
   <form id="upload-form">
     <input id="file" type="file" accept=".jpg,.jpeg,.mp4,.m4v" required>
     <button id="run" type="submit">Upload and Run</button>

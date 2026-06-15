@@ -33,6 +33,10 @@ type
     storePtr: pointer
     queue: ThreadQueue[JobRequest]
 
+  JobProgressCtx = object
+    storePtr: pointer
+    jobId: string
+
   JobRunner* = ref object
     queue: ThreadQueue[JobRequest]
     thread: Thread[ptr JobRunnerState]
@@ -46,8 +50,19 @@ proc currentRunner(): JobRunner {.gcsafe.} =
   {.cast(gcsafe).}:
     result = cast[JobRunner](gRunnerPtr)
 
-proc cleanupOldJobDirs(store: JobStore) {.gcsafe.} =
-  let removedJobs = store.pruneOldFinishedJobs(maxJobsToKeep)
+proc updateJobProgressFromOverlay(ctxPtr: pointer; progress: int; message: string) {.gcsafe.} =
+  if ctxPtr.isNil:
+    return
+
+  let ctx = cast[ptr JobProgressCtx](ctxPtr)
+  let store = cast[JobStore](ctx.storePtr)
+  if store.isNil:
+    return
+
+  store.updateJob(ctx.jobId, jsRunning, progress, message)
+
+proc cleanupOldJobDirs(store: JobStore; protectedJobId = "") {.gcsafe.} =
+  let removedJobs = store.pruneOldFinishedJobs(maxJobsToKeep, protectedJobId)
   if removedJobs.len == 0:
     return
 
@@ -85,13 +100,23 @@ proc processJob(store: JobStore; jobId: string) {.gcsafe.} =
       store.setDone(jobId, message)
 
     of jkMp4:
-      store.updateJob(jobId, jsRunning, 20, "decoding MP4 preview frame with libav_nim")
+      store.updateJob(jobId, jsRunning, 20, "running MP4 decode / HAILO / overlay / H.264 encode")
 
       var stats: OverlayStats
+      var progressCtx = JobProgressCtx(
+        storePtr: cast[pointer](store),
+        jobId: jobId
+      )
       {.cast(gcsafe).}:
-        stats = drawMp4PreviewOverlay(job.inputPath, job.outputPath, fontPath)
+        stats = drawMp4VideoOverlay(
+          job.inputPath,
+          job.outputPath,
+          fontPath,
+          updateJobProgressFromOverlay,
+          addr progressCtx
+        )
 
-      let message = "complete: mp4 preview via libav_nim; " & stats.formatOverlayStats()
+      let message = "complete: mp4 video via libav_nim; " & stats.formatOverlayStats()
       echo &"job {jobId}: {message}"
       store.setDone(jobId, message)
 
@@ -123,7 +148,7 @@ proc jobRunnerMain(state: ptr JobRunnerState) {.thread.} =
         break
       of jrkRun:
         store.processJob(req.jobId)
-        store.cleanupOldJobDirs()
+        store.cleanupOldJobDirs(req.jobId)
   finally:
     {.cast(gcsafe).}:
       closeHailoWorker()

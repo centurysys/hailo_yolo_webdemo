@@ -37,15 +37,12 @@ proc inputPath*(jobsDir, jobId: string, kind: JobKind): string =
 
 proc outputPath*(jobsDir, jobId: string, kind: JobKind): string =
   ## JPEG jobs produce output.jpg.
-  ##
-  ## The first MP4 step produces a JPEG preview frame with HAILO overlay instead
-  ## of a processed MP4.  Keeping this as the job output path allows the same
-  ## /files/<id> route to serve the preview image.
+  ## MP4 jobs now produce an annotated H.264/MP4 output video.
   case kind
   of jkJpeg:
     jobsDir.jobDir(jobId) / "output.jpg"
   of jkMp4:
-    jobsDir.jobDir(jobId) / "preview.jpg"
+    jobsDir.jobDir(jobId) / "output.mp4"
 
 proc extractedFramePath*(jobsDir, jobId: string): string =
   jobsDir.jobDir(jobId) / "frame.jpg"
