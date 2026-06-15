@@ -1,18 +1,17 @@
 ## hailo-yolo-webdemo entry point.
 ##
-## Step 1 target:
+## Current target:
 ##   - Mummy web server
 ##   - nginx X-FILE compatible upload endpoint
 ##   - /var/tmp/hailo-demo job directory layout
 ##   - in-memory job store
-##   - dummy runner that copies input to output
-##
-## HAILO, Pixie, JPEG decode/encode and MP4 pipeline will be introduced in
-## later steps without changing the public web routes.
+##   - JPEG YOLOv11s inference via HAILO-8L
+##   - Pixie bbox/label overlay and hyper_jpeg output
 
 import std/random
 
 import config
+import infer/hailo_worker
 import jobs/store
 import util/paths
 import web/server
@@ -21,10 +20,15 @@ when isMainModule:
   randomize()
 
   ensureWorkDirs(workRoot, uploadDir, jobsDir)
+  initHailoWorker()
   let jobStore = newJobStore()
 
   echo appName, " starting"
   echo "workRoot: ", workRoot
   echo "jobsDir : ", jobsDir
+  echo "hefPath : ", hefPath
 
-  startServer(jobStore)
+  try:
+    startServer(jobStore)
+  finally:
+    closeHailoWorker()

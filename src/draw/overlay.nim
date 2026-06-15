@@ -1,13 +1,13 @@
 ## Pixie based drawing helpers.
 ##
-## This step still uses dummy detections, but it now creates the real 640x640
-## RGB/NHWC YOLO input buffer with libyuv_nim before restoring dummy bboxes from
-## model-input coordinates into original-image coordinates.
+## JPEG jobs now generate the real 640x640 RGB/NHWC YOLO input buffer, run
+## HAILO YOLOv11s inference, restore boxes to original image coordinates, and
+## draw bbox/label overlays.
 
 import pixie
 import std/[math, os, strformat]
 
-import ../infer/yolo
+import ../infer/hailo_worker
 import ../media/[convert, jpeg]
 import ../types
 
@@ -93,13 +93,12 @@ proc drawDetections*(image: Image; detections: openArray[Detection]; fontPath: s
       ctx.setClassColor(d.classId)
       image.drawLabel(ctx, font, d)
 
-proc drawDemoOverlay*(inputPath, outputPath, fontPath: string) =
+proc drawHailoOverlay*(inputPath, outputPath, fontPath: string) =
   var image = readImage(inputPath)
 
-  ## Exercise the real libyuv_nim path.  yoloInput.rgb.data is the future
-  ## HAILO input buffer: 640x640 packed RGB/NHWC3.
+  ## yoloInput.rgb.data is the 640x640 packed RGB/NHWC3 buffer passed to HAILO.
   let yoloInput = image.prepareYoloInput()
-  let detections = demoDetectionsForLetterbox(yoloInput.info)
+  let detections = yoloInput.detectYolo()
 
   image.drawDetections(detections, fontPath)
   image.encodeImageToJpeg(outputPath)

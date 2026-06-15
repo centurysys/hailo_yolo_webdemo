@@ -60,7 +60,7 @@ proc renderIndexPage*(): string =
   let body = """
 <article>
   <h2>Upload</h2>
-  <p class="muted">現在のステップでは、libyuv_nimで640x640 YOLO入力bufferを作り、固定bboxを元画像座標へ戻して描画します。HAILO推論は次の段階で接続します。</p>
+  <p class="muted">JPEGをアップロードすると、HAILO-8L上のYOLOv11sで検出し、bbox/label付きのJPEGを生成します。MP4はまだcopy-throughです。</p>
   <form id="upload-form">
     <input id="file" type="file" accept=".jpg,.jpeg,.mp4" required>
     <button id="run" type="submit">Upload and Run</button>

@@ -1,8 +1,7 @@
 ## Initial runner.
 ##
-## JPEG jobs now exercise libyuv_nim YOLO input generation, letterbox coordinate
-## restoration, and overlay drawing.  MP4 still uses copy-through behavior until
-## the libav pipeline is introduced.
+## JPEG jobs now run the HAILO YOLOv11s path.  MP4 still uses copy-through
+## behavior until the libav pipeline is introduced.
 
 import std/[options, os]
 
@@ -25,10 +24,10 @@ proc enqueueJob*(store: JobStore, jobId: string) {.gcsafe.} =
 
     case job.kind
     of jkJpeg:
-      store.updateJob(jobId, jsRunning, 35, "generating libyuv YOLO input and drawing dummy detections")
+      store.updateJob(jobId, jsRunning, 35, "running HAILO YOLOv11s inference")
       {.cast(gcsafe).}:
-        drawDemoOverlay(job.inputPath, job.outputPath, fontPath)
-      store.setDone(jobId, "dummy complete: generated YOLO input and drew restored boxes")
+        drawHailoOverlay(job.inputPath, job.outputPath, fontPath)
+      store.setDone(jobId, "complete: ran HAILO YOLOv11s inference and drew overlay")
 
     of jkMp4:
       store.updateJob(jobId, jsRunning, 35, "dummy copy-through for MP4")
