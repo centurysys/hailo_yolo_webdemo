@@ -61,9 +61,14 @@ proc processJob(store: JobStore; jobId: string) {.gcsafe.} =
     case job.kind
     of jkJpeg:
       store.updateJob(jobId, jsRunning, 35, "running HAILO YOLOv11s inference")
+
+      var stats: OverlayStats
       {.cast(gcsafe).}:
-        drawHailoOverlay(job.inputPath, job.outputPath, fontPath)
-      store.setDone(jobId, "complete: ran HAILO YOLOv11s inference and drew overlay")
+        stats = drawHailoOverlay(job.inputPath, job.outputPath, fontPath)
+
+      let message = "complete: " & stats.formatOverlayStats()
+      echo &"job {jobId}: {message}"
+      store.setDone(jobId, message)
 
     of jkMp4:
       store.updateJob(jobId, jsRunning, 35, "dummy copy-through for MP4")

@@ -1,11 +1,15 @@
 ## Pixie based drawing helpers.
 ##
-## JPEG jobs now generate the real 640x640 RGB/NHWC YOLO input buffer, run
+## JPEG jobs generate the real 640x640 RGB/NHWC YOLO input buffer, run
 ## HAILO YOLOv11s inference, restore boxes to original image coordinates, and
 ## draw bbox/label overlays.
+##
+## This module also measures the expensive stages so the web demo can show
+## whether time is spent in JPEG decode/encode, preprocessing, HAILO inference,
+## or drawing.
 
 import pixie
-import std/[math, os, strformat]
+import std/[math, os, strformat, times]
 
 import ../infer/hailo_worker
 import ../media/[convert, jpeg]
@@ -16,6 +20,27 @@ const
   LabelHeight = 24.float32
   LabelPadX = 6.float32
   BoxThickness = 4.float32
+
+type
+  OverlayStats* = object
+    imageWidth*: int
+    imageHeight*: int
+    detections*: int
+    decodeMs*: int
+    letterboxMs*: int
+    inferMs*: int
+    drawMs*: int
+    encodeMs*: int
+    totalMs*: int
+
+proc elapsedMs(start: float): int =
+  result = int((epochTime() - start) * 1000.0 + 0.5)
+  if result < 0:
+    result = 0
+
+proc formatOverlayStats*(s: OverlayStats): string =
+  &"detections={s.detections}, image={s.imageWidth}x{s.imageHeight}, total={s.totalMs} ms " &
+  &"(decode={s.decodeMs}, letterbox={s.letterboxMs}, infer={s.inferMs}, draw={s.drawMs}, encode={s.encodeMs})"
 
 proc clampf(v, lo, hi: float32): float32 =
   result = max(lo, min(v, hi))
@@ -93,12 +118,31 @@ proc drawDetections*(image: Image; detections: openArray[Detection]; fontPath: s
       ctx.setClassColor(d.classId)
       image.drawLabel(ctx, font, d)
 
-proc drawHailoOverlay*(inputPath, outputPath, fontPath: string) =
+proc drawHailoOverlay*(inputPath, outputPath, fontPath: string): OverlayStats =
+  let totalStart = epochTime()
+
+  var stageStart = epochTime()
   var image = readImage(inputPath)
+  result.decodeMs = elapsedMs(stageStart)
+  result.imageWidth = image.width
+  result.imageHeight = image.height
 
   ## yoloInput.rgb.data is the 640x640 packed RGB/NHWC3 buffer passed to HAILO.
+  stageStart = epochTime()
   let yoloInput = image.prepareYoloInput()
-  let detections = yoloInput.detectYolo()
+  result.letterboxMs = elapsedMs(stageStart)
 
+  stageStart = epochTime()
+  let detections = yoloInput.detectYolo()
+  result.inferMs = elapsedMs(stageStart)
+  result.detections = detections.len
+
+  stageStart = epochTime()
   image.drawDetections(detections, fontPath)
+  result.drawMs = elapsedMs(stageStart)
+
+  stageStart = epochTime()
   image.encodeImageToJpeg(outputPath)
+  result.encodeMs = elapsedMs(stageStart)
+
+  result.totalMs = elapsedMs(totalStart)

@@ -60,7 +60,7 @@ proc renderIndexPage*(): string =
   let body = """
 <article>
   <h2>Upload</h2>
-  <p class="muted">JPEGをアップロードすると、background job worker が HAILO-8L上のYOLOv11sで検出し、bbox/label付きのJPEGを生成します。MP4はまだcopy-throughです。</p>
+  <p class="muted">JPEGをアップロードすると、background job worker が HAILO-8L上のYOLOv11sで検出し、bbox/label付きのJPEGを生成します。完了メッセージには decode / letterbox / infer / draw / encode の計測値を表示します。MP4はまだcopy-throughです。</p>
   <form id="upload-form">
     <input id="file" type="file" accept=".jpg,.jpeg,.mp4" required>
     <button id="run" type="submit">Upload and Run</button>
@@ -122,7 +122,7 @@ async function poll() {{
     location.href = '/result/' + encodeURIComponent(jobId);
     return;
   }}
-  setTimeout(poll, 700);
+  setTimeout(poll, 150);
 }}
 poll();
 </script>
