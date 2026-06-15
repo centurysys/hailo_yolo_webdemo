@@ -300,7 +300,7 @@ proc renderResultPage*(job: JobInfo): string =
       if job.isImageOutput:
         &"<img class=\"result-media\" src=\"/files/{job.id.htmlEscape}\" alt=\"result\">"
       else:
-        &"{previewBlock}<video class=\"result-media\" controls src=\"/files/{job.id.htmlEscape}\"></video>"
+        &"{previewBlock}<video class=\"result-media\" controls preload=\"metadata\" src=\"/job-media/{job.id.htmlEscape}/output.mp4\"></video>"
     else:
       &"<p class=\"error\">{job.message.htmlEscape}</p>"
 
