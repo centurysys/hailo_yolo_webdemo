@@ -157,10 +157,23 @@ proc outputFilename(job: JobInfo): string =
 proc handleIndex*(request: Request) {.gcsafe.} =
   request.respondHtml(200, renderIndexPage())
 
-proc handleDemoCss*(request: Request) {.gcsafe.} =
+proc respondAsset(request: Request; contentType, body: string) {.gcsafe.} =
   var headers: HttpHeaders
-  headers["Content-Type"] = "text/css; charset=utf-8"
-  request.respond(200, headers, demoCss())
+  headers["Content-Type"] = contentType
+  headers["Cache-Control"] = "no-store"
+  request.respond(200, headers, body)
+
+proc handleDemoCss*(request: Request) {.gcsafe.} =
+  request.respondAsset("text/css; charset=utf-8", demoCss())
+
+proc handleIndexJs*(request: Request) {.gcsafe.} =
+  request.respondAsset("application/javascript; charset=utf-8", indexJs())
+
+proc handleWaitJs*(request: Request) {.gcsafe.} =
+  request.respondAsset("application/javascript; charset=utf-8", waitJs())
+
+proc handleResultViewerJs*(request: Request) {.gcsafe.} =
+  request.respondAsset("application/javascript; charset=utf-8", resultViewerJs())
 
 proc handleMissingPico*(request: Request) {.gcsafe.} =
   ## Keep standalone development harmless when Pico CSS has not been installed

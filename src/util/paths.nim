@@ -48,6 +48,9 @@ proc outputPath*(jobsDir, jobId: string, kind: JobKind): string =
 proc previewPath*(jobsDir, jobId: string): string =
   jobsDir.jobDir(jobId) / "preview.jpg"
 
+proc detectionsPath*(jobsDir, jobId: string): string =
+  jobsDir.jobDir(jobId) / "detections.json"
+
 proc extractedFramePath*(jobsDir, jobId: string): string =
   jobsDir.jobDir(jobId) / "frame.jpg"
 

@@ -111,6 +111,17 @@ type
     fixedBitrate: int
     autoMultiplierPercent: int
 
+  DetectionJsonWriter = object
+    outputPath: string
+    tmpPath: string
+    file: File
+    opened: bool
+    firstFrame: bool
+    width: int
+    height: int
+    frameCount: int
+    detectionCount: int
+
   OverlayDrawOptions* = object
     maxBoxes: int
     maxLabels: int
@@ -528,6 +539,23 @@ proc progressTimestampSeconds(
 
   result = false
 
+proc detectionTimestampSeconds(
+    frameIndex: int;
+    timestampSeconds: float64;
+    hasTimestampSeconds: bool;
+    info: VideoProgressInfo
+  ): float64 =
+  ## Return the best timestamp for browser-side overlay synchronization.
+  ## This should represent the displayed frame timestamp, not the processed end
+  ## time used by the progress bar.
+  if hasTimestampSeconds and (timestampSeconds > 0.0 or frameIndex == 0):
+    return max(0.0, timestampSeconds)
+
+  if info.hasSourceFps and info.sourceFps > 0.0 and frameIndex >= 0:
+    return max(0.0, float64(frameIndex) / info.sourceFps)
+
+  result = max(0.0, float64(frameIndex))
+
 proc videoProgressPercent(
     processedFrames: int;
     maxFrames: int;
@@ -711,6 +739,150 @@ proc clampDetection(d: Detection; imageW, imageH: int): Detection =
   result.y = clampf(d.y, 0, maxY)
   result.w = clampf(d.w, 1, imageW.float32 - result.x)
   result.h = clampf(d.h, 1, imageH.float32 - result.y)
+
+proc jsonEscapedString(value: string): string =
+  result = "\""
+  for ch in value:
+    case ch
+    of '"': result.add("\\\"")
+    of '\\': result.add("\\\\")
+    of '\b': result.add("\\b")
+    of '\f': result.add("\\f")
+    of '\n': result.add("\\n")
+    of '\r': result.add("\\r")
+    of '\t': result.add("\\t")
+    else:
+      let code = ord(ch)
+      if code < 0x20:
+        result.add(&"\\u{code:04x}")
+      else:
+        result.add(ch)
+  result.add('"')
+
+proc writeJsonField(file: File; name: string; value: string; comma = true) =
+  file.write(&"    \"{name}\": {value}")
+  if comma:
+    file.write(",")
+  file.write("\n")
+
+proc moveDetectionJsonIntoPlace(writer: var DetectionJsonWriter) =
+  try:
+    moveFile(writer.tmpPath, writer.outputPath)
+  except OSError:
+    try:
+      if fileExists(writer.outputPath):
+        removeFile(writer.outputPath)
+    except OSError:
+      discard
+    moveFile(writer.tmpPath, writer.outputPath)
+
+proc openDetectionJsonWriter(
+    outputPath: string;
+    width, height: int;
+    inputInfo: VideoProgressInfo
+  ): DetectionJsonWriter =
+  if outputPath.len == 0:
+    return
+
+  let dir = outputPath.splitFile.dir
+  if dir.len > 0:
+    createDir(dir)
+
+  result.outputPath = outputPath
+  result.tmpPath = outputPath & ".tmp"
+  result.width = width
+  result.height = height
+  result.firstFrame = true
+  result.file = open(result.tmpPath, fmWrite)
+  result.opened = true
+
+  result.file.write("{\n")
+  result.file.write("  \"version\": 1,\n")
+  result.file.write("  \"video\": {\n")
+  result.file.writeJsonField("width", $width)
+  result.file.writeJsonField("height", $height)
+  if inputInfo.hasSourceFps:
+    result.file.writeJsonField("sourceFps", &"{inputInfo.sourceFps:.6f}")
+    result.file.writeJsonField("sourceFpsNum", $inputInfo.sourceFpsNum)
+    result.file.writeJsonField("sourceFpsDen", $inputInfo.sourceFpsDen)
+  else:
+    result.file.writeJsonField("sourceFps", "0.000000")
+    result.file.writeJsonField("sourceFpsNum", "0")
+    result.file.writeJsonField("sourceFpsDen", "0")
+  if inputInfo.hasDuration:
+    result.file.writeJsonField("durationSeconds", &"{inputInfo.durationSeconds:.6f}")
+  else:
+    result.file.writeJsonField("durationSeconds", "0.000000")
+  if inputInfo.hasEstimatedTotalFrames:
+    result.file.writeJsonField("estimatedTotalFrames", $inputInfo.estimatedTotalFrames, comma = false)
+  else:
+    result.file.writeJsonField("estimatedTotalFrames", "0", comma = false)
+  result.file.write("  },\n")
+  result.file.write("  \"frames\": [\n")
+
+proc isOpen(writer: DetectionJsonWriter): bool =
+  writer.opened
+
+proc writeFrameDetections(
+    writer: var DetectionJsonWriter;
+    frameIndex: int;
+    timestampSeconds: float64;
+    detections: openArray[Detection]
+  ) =
+  if not writer.opened:
+    return
+
+  if not writer.firstFrame:
+    writer.file.write(",\n")
+  writer.firstFrame = false
+
+  writer.file.write(&"    {{\"frame\": {frameIndex}, \"time\": {timestampSeconds:.6f}, \"detections\": [")
+
+  for i, raw in detections:
+    if i > 0:
+      writer.file.write(",")
+
+    let d = raw.clampDetection(writer.width, writer.height)
+    let
+      nx = d.x / max(1.float32, writer.width.float32)
+      ny = d.y / max(1.float32, writer.height.float32)
+      nw = d.w / max(1.float32, writer.width.float32)
+      nh = d.h / max(1.float32, writer.height.float32)
+
+    writer.file.write(
+      &"{{\"classId\": {d.classId}, \"label\": {jsonEscapedString(d.label)}, " &
+      &"\"score\": {d.score:.6f}, \"x\": {nx:.6f}, \"y\": {ny:.6f}, " &
+      &"\"w\": {nw:.6f}, \"h\": {nh:.6f}}}"
+    )
+
+  writer.file.write("]}")
+  inc writer.frameCount
+  writer.detectionCount += detections.len
+
+proc closeDetectionJsonWriter(writer: var DetectionJsonWriter) =
+  if not writer.opened:
+    return
+
+  writer.file.write("\n  ],\n")
+  writer.file.write(&"  \"frameCount\": {writer.frameCount},\n")
+  writer.file.write(&"  \"detectionCount\": {writer.detectionCount}\n")
+  writer.file.write("}\n")
+  writer.file.close()
+  writer.opened = false
+  writer.moveDetectionJsonIntoPlace()
+
+proc abortDetectionJsonWriter(writer: var DetectionJsonWriter) =
+  if writer.opened:
+    try:
+      writer.file.close()
+    except IOError:
+      discard
+    writer.opened = false
+  if writer.tmpPath.len > 0 and fileExists(writer.tmpPath):
+    try:
+      removeFile(writer.tmpPath)
+    except OSError:
+      discard
 
 proc setClassColor(ctx: Context; classId: int) =
   case classId mod 4
@@ -1216,6 +1388,7 @@ type
     frameIndex: int
     pending: YoloAsyncPending
     rgbx: OwnedRGBXFrame
+    frameTimestampSeconds: float64
     progressSeconds: float64
     hasProgressSeconds: bool
 
@@ -1301,6 +1474,7 @@ proc drainOldestPendingVideoFrame(
     previewFrameNumber: int;
     previewSaved: var bool;
     rgbxPool: var seq[OwnedRGBXFrame];
+    detectionsWriter: var DetectionJsonWriter;
     stats: var OverlayStats
   ) =
   if pendingFrames.len == 0:
@@ -1325,6 +1499,12 @@ proc drainOldestPendingVideoFrame(
       IOError,
       &"HAILO result frame mismatch: expected={item.frameIndex} actual={yoloResult.requestId}"
     )
+
+  detectionsWriter.writeFrameDetections(
+    item.frameIndex,
+    item.frameTimestampSeconds,
+    yoloResult.detections
+  )
 
   var stageStart = epochTime()
   let drawResult = item.rgbx.drawDetectionsOnRgbxFrame(
@@ -1391,6 +1571,7 @@ type
     frameIndex: int
     pending: YoloAsyncPending
     rgbx: Pooled[OwnedRGBXFrame]
+    frameTimestampSeconds: float64
     progressSeconds: float64
     hasProgressSeconds: bool
     message: string
@@ -1421,6 +1602,7 @@ type
     progressQ: ThreadQueue[VideoPipelineProgress]
     outputPath: SharedCString
     previewOutputPath: SharedCString
+    detectionsOutputPath: SharedCString
     fontPath: SharedCString
     fpsNum: int
     fpsDen: int
@@ -1619,6 +1801,7 @@ proc processThreadedVideoPipelineFrame(
     previewOutputPath: string;
     previewFrameNumber: int;
     previewSaved: var bool;
+    detectionsWriter: var DetectionJsonWriter;
     maxFrames: int;
     progressInfo: VideoProgressInfo;
     progressQ: ThreadQueue[VideoPipelineProgress];
@@ -1646,6 +1829,12 @@ proc processThreadedVideoPipelineFrame(
       IOError,
       &"HAILO result frame mismatch: expected={item.frameIndex} actual={yoloResult.requestId}"
     )
+
+  detectionsWriter.writeFrameDetections(
+    item.frameIndex,
+    item.frameTimestampSeconds,
+    yoloResult.detections
+  )
 
   var stageStart = epochTime()
   let drawResult = item.rgbx.value.drawDetectionsOnRgbxFrame(
@@ -1689,6 +1878,7 @@ proc videoPipelineConsumerMain(state: VideoPipelineWorkerState) {.thread.} =
     let
       outputPath = state.outputPath.toLocalString()
       previewOutputPath = state.previewOutputPath.toLocalString()
+      detectionsOutputPath = state.detectionsOutputPath.toLocalString()
       fontPath = state.fontPath.toLocalString()
       encoderName = state.encoderName.toLocalString()
       loadedFont = loadOverlayFont(fontPath)
@@ -1696,6 +1886,7 @@ proc videoPipelineConsumerMain(state: VideoPipelineWorkerState) {.thread.} =
     var
       encoder: VideoEncoder
       writer: Mp4VideoWriter
+      detectionsWriter: DetectionJsonWriter
       encoderReady = false
       previewSaved = false
 
@@ -1736,6 +1927,12 @@ proc videoPipelineConsumerMain(state: VideoPipelineWorkerState) {.thread.} =
             stageStart = epochTime()
             writer = checkFFmpeg(openMp4VideoWriter(outputPath, encoder), "open MP4 writer")
             workerResult.stats.writerOpenMs = elapsedMs(stageStart)
+            detectionsWriter = openDetectionJsonWriter(
+              detectionsOutputPath,
+              frameW,
+              frameH,
+              state.progressInfo
+            )
             encoderReady = true
 
           processThreadedVideoPipelineFrame(
@@ -1748,6 +1945,7 @@ proc videoPipelineConsumerMain(state: VideoPipelineWorkerState) {.thread.} =
             previewOutputPath,
             state.previewFrameNumber,
             previewSaved,
+            detectionsWriter,
             state.maxFrames,
             state.progressInfo,
             state.progressQ,
@@ -1776,7 +1974,10 @@ proc videoPipelineConsumerMain(state: VideoPipelineWorkerState) {.thread.} =
       workerResult.stats.writerFinishMs = elapsedMs(stageStart)
       workerResult.stats.encodeMs += workerResult.stats.writerFinishMs
 
+      closeDetectionJsonWriter(detectionsWriter)
+
     finally:
+      abortDetectionJsonWriter(detectionsWriter)
       if not writer.isNil:
         writer.close()
       if not encoder.isNil:
@@ -1861,7 +2062,8 @@ proc drawMp4VideoOverlayThreaded(
     previewOutputPath = "";
     options: JobOptions = defaultJobOptions();
     onProgress: OverlayProgressCallback = nil;
-    progressCtx: pointer = nil
+    progressCtx: pointer = nil;
+    detectionsOutputPath = ""
   ): OverlayStats =
   ## Step 6 video pipeline.
   ##
@@ -1900,6 +2102,7 @@ proc drawMp4VideoOverlayThreaded(
   var
     sharedOutputPath = initSharedCString(outputPath)
     sharedPreviewOutputPath = initSharedCString(previewOutputPath)
+    sharedDetectionsOutputPath = initSharedCString(detectionsOutputPath)
     sharedFontPath = initSharedCString(fontPath)
     sharedEncoderName = initSharedCString(encoderName)
 
@@ -1924,6 +2127,7 @@ proc drawMp4VideoOverlayThreaded(
       progressQ: progressQ,
       outputPath: sharedOutputPath,
       previewOutputPath: sharedPreviewOutputPath,
+      detectionsOutputPath: sharedDetectionsOutputPath,
       fontPath: sharedFontPath,
       fpsNum: outputFps.num,
       fpsDen: outputFps.den,
@@ -1955,6 +2159,12 @@ proc drawMp4VideoOverlayThreaded(
       result.imageWidth = frameRead.frameWidth
       result.imageHeight = frameRead.frameHeight
       result.previewFrameIndex = frameRead.frameIndex
+      let frameTimestampSeconds = detectionTimestampSeconds(
+        frameRead.frameIndex,
+        frameRead.timestampSeconds,
+        frameRead.hasTimestampSeconds,
+        progressInfo
+      )
       var progressSeconds = 0.0
       let hasProgressSeconds = progressTimestampSeconds(
         frameRead.frameIndex,
@@ -2005,6 +2215,7 @@ proc drawMp4VideoOverlayThreaded(
         frameIndex: frameRead.frameIndex,
         pending: pending,
         rgbx: move rgbxItem,
+        frameTimestampSeconds: frameTimestampSeconds,
         progressSeconds: progressSeconds,
         hasProgressSeconds: hasProgressSeconds
       )
@@ -2034,6 +2245,7 @@ proc drawMp4VideoOverlayThreaded(
 
     sharedOutputPath.freeSharedCString()
     sharedPreviewOutputPath.freeSharedCString()
+    sharedDetectionsOutputPath.freeSharedCString()
     sharedFontPath.freeSharedCString()
     sharedEncoderName.freeSharedCString()
 
@@ -2060,6 +2272,7 @@ proc drawMp4VideoOverlayThreaded(
       joinThread(consumerThread)
       sharedOutputPath.freeSharedCString()
       sharedPreviewOutputPath.freeSharedCString()
+      sharedDetectionsOutputPath.freeSharedCString()
       sharedFontPath.freeSharedCString()
       sharedEncoderName.freeSharedCString()
     raise
@@ -2069,7 +2282,8 @@ proc drawMp4VideoOverlayLookahead(
     previewOutputPath = "";
     options: JobOptions = defaultJobOptions();
     onProgress: OverlayProgressCallback = nil;
-    progressCtx: pointer = nil
+    progressCtx: pointer = nil;
+    detectionsOutputPath = ""
   ): OverlayStats =
   ## Decode the uploaded MP4, run YOLO on each decoded frame, draw bbox/labels,
   ## and encode the result as H.264 MP4.
@@ -2101,12 +2315,14 @@ proc drawMp4VideoOverlayLookahead(
   var
     encoder: VideoEncoder
     writer: Mp4VideoWriter
+    detectionsWriter: DetectionJsonWriter
     encoderReady = false
     pendingFrames: seq[PendingVideoFrame] = @[]
     rgbxPool: seq[OwnedRGBXFrame] = @[]
     previewSaved = false
 
   defer:
+    abortDetectionJsonWriter(detectionsWriter)
     if not writer.isNil:
       writer.close()
     if not encoder.isNil:
@@ -2122,6 +2338,12 @@ proc drawMp4VideoOverlayLookahead(
     result.imageWidth = frameRead.frameWidth
     result.imageHeight = frameRead.frameHeight
     result.previewFrameIndex = frameRead.frameIndex
+    let frameTimestampSeconds = detectionTimestampSeconds(
+      frameRead.frameIndex,
+      frameRead.timestampSeconds,
+      frameRead.hasTimestampSeconds,
+      progressInfo
+    )
     var progressSeconds = 0.0
     let hasProgressSeconds = progressTimestampSeconds(
       frameRead.frameIndex,
@@ -2157,6 +2379,12 @@ proc drawMp4VideoOverlayLookahead(
       stageStart = epochTime()
       writer = checkFFmpeg(openMp4VideoWriter(outputPath, encoder), "open MP4 writer")
       result.writerOpenMs = elapsedMs(stageStart)
+      detectionsWriter = openDetectionJsonWriter(
+        detectionsOutputPath,
+        frameRead.frameWidth,
+        frameRead.frameHeight,
+        progressInfo
+      )
       encoderReady = true
 
     var stageStart = epochTime()
@@ -2185,6 +2413,7 @@ proc drawMp4VideoOverlayLookahead(
       frameIndex: frameRead.frameIndex,
       pending: pending,
       rgbx: move rgbx,
+      frameTimestampSeconds: frameTimestampSeconds,
       progressSeconds: progressSeconds,
       hasProgressSeconds: hasProgressSeconds
     )
@@ -2202,6 +2431,7 @@ proc drawMp4VideoOverlayLookahead(
         previewFrameNumber,
         previewSaved,
         rgbxPool,
+        detectionsWriter,
         result
       )
       notifyVideoFrameProgress(onProgress, progressCtx, result, maxFrames, progressInfo)
@@ -2218,6 +2448,7 @@ proc drawMp4VideoOverlayLookahead(
       previewFrameNumber,
       previewSaved,
       rgbxPool,
+      detectionsWriter,
       result
     )
     notifyVideoFrameProgress(onProgress, progressCtx, result, maxFrames, progressInfo)
@@ -2238,6 +2469,8 @@ proc drawMp4VideoOverlayLookahead(
   result.writerFinishMs = elapsedMs(stageStart)
   result.encodeMs += result.writerFinishMs
 
+  closeDetectionJsonWriter(detectionsWriter)
+
   result.decodeMs = result.decoderOpenMs + result.readFrameMs
   result.totalMs = elapsedMs(totalStart)
 
@@ -2247,7 +2480,8 @@ proc drawMp4VideoOverlay*(
     previewOutputPath = "";
     options: JobOptions = defaultJobOptions();
     onProgress: OverlayProgressCallback = nil;
-    progressCtx: pointer = nil
+    progressCtx: pointer = nil;
+    detectionsOutputPath = ""
   ): OverlayStats =
   if useMp4ThreadPipeline():
     return drawMp4VideoOverlayThreaded(
@@ -2257,7 +2491,8 @@ proc drawMp4VideoOverlay*(
       previewOutputPath,
       options,
       onProgress,
-      progressCtx
+      progressCtx,
+      detectionsOutputPath
     )
 
   result = drawMp4VideoOverlayLookahead(
@@ -2267,7 +2502,8 @@ proc drawMp4VideoOverlay*(
     previewOutputPath,
     options,
     onProgress,
-    progressCtx
+    progressCtx,
+    detectionsOutputPath
   )
 
 proc drawMp4PreviewOverlay*(inputPath, outputPath, fontPath: string): OverlayStats =

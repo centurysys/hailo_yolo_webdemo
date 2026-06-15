@@ -1,0 +1,95 @@
+:root { color-scheme: light dark; }
+[hidden] { display: none !important; }
+body { max-width: 960px; margin: 0 auto; padding: 2rem 1rem; font-family: system-ui, sans-serif; }
+header { margin-bottom: 1.5rem; }
+article { border: 1px solid #d0d7de; border-radius: 0.75rem; padding: 1rem; margin: 1rem 0; }
+button, input, select { font: inherit; }
+button { padding: 0.55rem 1rem; border-radius: 0.4rem; border: 1px solid #0969da; background: #0969da; color: white; cursor: pointer; }
+button[disabled] { opacity: 0.55; cursor: wait; }
+progress { width: 100%; height: 1rem; }
+.result-media { max-width: 100%; border-radius: 0.5rem; border: 1px solid #d0d7de; }
+.preview-card { margin-top: 1rem; }
+.preview-card img { max-width: 100%; border-radius: 0.5rem; border: 1px solid #d0d7de; display: block; }
+.muted { opacity: 0.72; }
+.error { color: #cf222e; }
+.summary-card { background: color-mix(in srgb, CanvasText 4%, Canvas); border: 1px solid #d0d7de; border-radius: 0.6rem; padding: 0.85rem; margin: 1rem 0; }
+.summary-card p { margin: 0.25rem 0 0; }
+.details-log { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.85rem; line-height: 1.45; max-height: 18rem; overflow: auto; border: 1px solid #d0d7de; border-radius: 0.5rem; padding: 0.75rem; }
+.result-actions { margin-top: 1rem; }
+.media-grid { display: grid; grid-template-columns: 1fr; gap: 1rem; align-items: start; }
+.media-card { border: 1px solid #d0d7de; border-radius: 0.65rem; padding: 0.85rem; background: color-mix(in srgb, CanvasText 3%, Canvas); }
+.media-card h3 { margin-top: 0; }
+.media-card p { margin: 0.35rem 0 0.75rem; }
+.media-card .result-media { display: block; width: 100%; }
+.row { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
+.upload-form { display: grid; gap: 1.1rem; }
+.file-row { display: grid; gap: 0.35rem; }
+.options-panel { margin-top: 0.25rem; }
+.options-panel h3 { margin: 0 0 0.8rem; }
+.options-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.9rem; align-items: start; }
+.option-card { border: 1px solid color-mix(in srgb, CanvasText 18%, Canvas); border-radius: 0.65rem; padding: 0.85rem; background: color-mix(in srgb, CanvasText 3%, Canvas); }
+.option-card label, .manual-extra label, .advanced-grid label { display: grid; gap: 0.35rem; margin: 0; }
+.option-card select, .option-card input, .manual-extra input, .advanced-grid input { width: 100%; box-sizing: border-box; }
+.option-title { font-weight: 700; margin-bottom: 0.45rem; }
+.option-note { display: block; font-size: 0.88rem; line-height: 1.45; margin-top: 0.45rem; }
+.manual-extra { margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid color-mix(in srgb, CanvasText 14%, Canvas); }
+.advanced-options { margin-top: 0.9rem; border: 1px solid color-mix(in srgb, CanvasText 14%, Canvas); border-radius: 0.65rem; padding: 0.75rem 0.85rem; }
+.advanced-options summary { cursor: pointer; font-weight: 700; }
+.advanced-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.75rem; margin-top: 0.75rem; }
+.form-actions { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; margin-top: 0.1rem; }
+#message { margin: 0; }
+@media (max-width: 720px) {
+  body { padding: 1rem 0.75rem; }
+  .options-grid { grid-template-columns: 1fr; }
+  .advanced-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 480px) {
+  .advanced-grid { grid-template-columns: 1fr; }
+}
+
+/* Interactive result viewer */
+.interactive-viewer { overflow: hidden; }
+.viewer-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  align-items: center;
+  margin: 0.8rem 0;
+}
+.viewer-toolbar button { margin: 0; }
+.compact-control {
+  display: flex;
+  gap: 0.45rem;
+  align-items: center;
+  margin: 0;
+}
+.compact-control select { min-width: 9rem; }
+.checkbox-control {
+  display: inline-flex;
+  gap: 0.35rem;
+  align-items: center;
+  margin: 0;
+  white-space: nowrap;
+}
+.checkbox-control input { margin: 0; }
+.viewer-status { font-size: 0.9rem; }
+.video-overlay-wrap {
+  position: relative;
+  display: block;
+  width: 100%;
+  line-height: 0;
+}
+.video-overlay-wrap video { display: block; width: 100%; }
+.overlay-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+@media (max-width: 720px) {
+  .viewer-toolbar { align-items: stretch; }
+  .compact-control { width: 100%; justify-content: space-between; }
+  .compact-control select { min-width: 0; flex: 1; }
+  .viewer-status { width: 100%; }
+}

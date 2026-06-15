@@ -1,0 +1,12 @@
+<article id="wait-page" data-job-id="{{JOB_ID}}">
+  <h2>Status</h2>
+  <p>job: <code>{{JOB_ID}}</code></p>
+  <progress id="progress" value="0" max="100"></progress>
+  <p id="status" class="muted">queued</p>
+
+  <section id="preview-card" class="preview-card" hidden>
+    <h3>Preview frame</h3>
+    <p class="muted">A single annotated preview frame appears here once it becomes available.</p>
+    <img id="preview-image" alt="processing preview">
+  </section>
+</article>
