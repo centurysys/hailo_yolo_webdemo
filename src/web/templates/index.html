@@ -1,0 +1,80 @@
+<article>
+  <h2>Upload</h2>
+  <p class="muted">JPEGはHAILO-8L上のYOLOv11sで検出し、bbox/label付きJPEGを生成します。MP4は各フレームにYOLO検出結果をoverlayし、bbox/label付きH.264/MP4を生成します。</p>
+  <form id="upload-form" class="upload-form">
+    <label class="file-row">
+      <span>Input file</span>
+      <input id="file" type="file" accept=".jpg,.jpeg,.mp4,.m4v" required>
+    </label>
+
+    <section class="options-panel" aria-labelledby="processing-options-title">
+      <h3 id="processing-options-title">Processing options</h3>
+
+      <div class="options-grid">
+        <div class="option-card">
+          <div class="option-title">MP4 quality</div>
+          <label>
+            <span class="muted">出力MP4の画質</span>
+            <select id="mp4-quality">
+              <option value="auto" selected>Auto</option>
+              <option value="small">Small file</option>
+              <option value="balanced">Balanced</option>
+              <option value="high">High quality</option>
+              <option value="manual">Manual</option>
+            </select>
+          </label>
+          <span class="muted option-note">ブロックノイズが気になる場合は High quality を選びます。</span>
+
+          <div id="manual-bitrate-row" class="manual-extra" hidden>
+            <label>
+              Manual bitrate (Mbps)
+              <input id="manual-bitrate" type="number" min="0.25" max="20" step="0.25" value="4">
+            </label>
+          </div>
+        </div>
+
+        <div class="option-card">
+          <div class="option-title">Overlay amount</div>
+          <label>
+            <span class="muted">bbox / label の表示量</span>
+            <select id="overlay-preset">
+              <option value="light">Light</option>
+              <option value="balanced" selected>Balanced</option>
+              <option value="rich">Rich</option>
+              <option value="boxes-only">Boxes only</option>
+              <option value="manual">Manual</option>
+            </select>
+          </label>
+          <span class="muted option-note">多すぎる場合は Light または Boxes only が見やすいです。</span>
+        </div>
+      </div>
+
+      <details id="advanced-options" class="advanced-options">
+        <summary>Advanced overlay thresholds</summary>
+        <div class="advanced-grid">
+          <label>
+            Max boxes
+            <input id="max-boxes" type="number" min="0" max="200" step="1" value="12">
+          </label>
+          <label>
+            Max labels
+            <input id="max-labels" type="number" min="0" max="200" step="1" value="6">
+          </label>
+          <label>
+            Box score threshold
+            <input id="min-box-score" type="number" min="0" max="1" step="0.05" value="0.25">
+          </label>
+          <label>
+            Label score threshold
+            <input id="min-label-score" type="number" min="0" max="1" step="0.05" value="0.50">
+          </label>
+        </div>
+      </details>
+    </section>
+
+    <div class="form-actions">
+      <button id="run" type="submit">Upload and Run</button>
+      <p id="message" class="muted"></p>
+    </div>
+  </form>
+</article>

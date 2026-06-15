@@ -122,7 +122,8 @@ proc processJob(store: JobStore; jobId: string) {.gcsafe.} =
           previewPath(jobsDir, jobId),
           job.options,
           updateJobProgressFromOverlay,
-          addr progressCtx
+          addr progressCtx,
+          detectionsPath(jobsDir, jobId)
         )
 
       let

@@ -21,6 +21,9 @@ proc startServer*(jobStore: JobStore) =
   router.get("/preview/*", handlePreview)
   router.get("/files/*", handleFile)
   router.get("/static/demo.css", handleDemoCss)
+  router.get("/static/index.js", handleIndexJs)
+  router.get("/static/wait.js", handleWaitJs)
+  router.get("/static/result-viewer.js", handleResultViewerJs)
   router.get("/static/pico.min.css", handleMissingPico)
   router.get("/*", handleNotFound)
 
