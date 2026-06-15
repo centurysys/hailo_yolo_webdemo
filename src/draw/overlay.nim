@@ -107,6 +107,10 @@ type
     gopSize: int
     source: string
 
+  VideoBitrateConfig = object
+    fixedBitrate: int
+    autoMultiplierPercent: int
+
   OverlayDrawOptions* = object
     maxBoxes: int
     maxLabels: int
@@ -159,6 +163,42 @@ proc resolveVideoDrawOptions(): OverlayDrawOptions =
   result.minLabelScore = parseEnvFloat32Draw("HAILO_DEMO_VIDEO_MIN_LABEL_SCORE", 0.50.float32)
   result.minLabelBoxHeight = parseEnvFloat32Draw("HAILO_DEMO_VIDEO_MIN_LABEL_BOX_HEIGHT", 96.0.float32)
   result.minLabelBoxArea = parseEnvFloat32Draw("HAILO_DEMO_VIDEO_MIN_LABEL_BOX_AREA", 8000.0.float32)
+
+proc resolveDrawOptionsFromJobOptions(options: JobOptions; video: bool): OverlayDrawOptions =
+  let base = if video: resolveVideoDrawOptions() else: resolveStillDrawOptions()
+
+  case options.overlayPreset
+  of opLight:
+    result = base
+    result.maxBoxes = 8
+    result.maxLabels = 3
+    result.minBoxScore = 0.35.float32
+    result.minLabelScore = 0.60.float32
+    result.minLabelBoxHeight = if video: 120.0.float32 else: MinLabelBoxHeight
+    result.minLabelBoxArea = if video: 12000.0.float32 else: MinLabelBoxArea
+  of opBalanced:
+    ## Preserve service-level environment defaults for the normal path.
+    result = base
+  of opRich:
+    result = base
+    result.maxBoxes = 24
+    result.maxLabels = 12
+    result.minBoxScore = 0.20.float32
+    result.minLabelScore = 0.40.float32
+    result.minLabelBoxHeight = if video: 64.0.float32 else: MinLabelBoxHeight
+    result.minLabelBoxArea = if video: 3000.0.float32 else: MinLabelBoxArea
+  of opBoxesOnly:
+    result = base
+    result.maxBoxes = 16
+    result.maxLabels = 0
+    result.minBoxScore = 0.25.float32
+    result.minLabelScore = 1.0.float32
+  of opManual:
+    result = base
+    result.maxBoxes = max(0, options.maxBoxes)
+    result.maxLabels = max(0, options.maxLabels)
+    result.minBoxScore = min(1.0.float32, max(0.0.float32, options.minBoxScore))
+    result.minLabelScore = min(1.0.float32, max(0.0.float32, options.minLabelScore))
 
 proc elapsedMs(start: float): int =
   result = int((epochTime() - start) * 1000.0 + 0.5)
@@ -866,14 +906,15 @@ proc finishOverlayWithDetections(
     detections: openArray[Detection];
     outputPath, fontPath: string;
     stats: var OverlayStats;
-    totalStart: float
+    totalStart: float;
+    drawOptions: OverlayDrawOptions
   ) =
   stats.imageWidth = image.width
   stats.imageHeight = image.height
   stats.detections = detections.len
 
   var stageStart = epochTime()
-  let drawResult = image.drawDetections(detections, fontPath)
+  let drawResult = image.drawDetectionsWithOptions(detections, fontPath, drawOptions)
   stats.boxesDrawn = drawResult.boxes
   stats.labelsDrawn = drawResult.labels
   stats.drawMs += elapsedMs(stageStart)
@@ -889,15 +930,16 @@ proc finishOverlay(
     yoloInput: YoloInputImage;
     outputPath, fontPath: string;
     stats: var OverlayStats;
-    totalStart: float
+    totalStart: float;
+    drawOptions: OverlayDrawOptions
   ) =
   var stageStart = epochTime()
   let detections = yoloInput.detectYolo()
   stats.inferMs = elapsedMs(stageStart)
 
-  image.finishOverlayWithDetections(detections, outputPath, fontPath, stats, totalStart)
+  image.finishOverlayWithDetections(detections, outputPath, fontPath, stats, totalStart, drawOptions)
 
-proc drawHailoOverlay*(inputPath, outputPath, fontPath: string): OverlayStats =
+proc drawHailoOverlay*(inputPath, outputPath, fontPath: string; options: JobOptions = defaultJobOptions()): OverlayStats =
   let totalStart = epochTime()
 
   var stageStart = epochTime()
@@ -909,7 +951,7 @@ proc drawHailoOverlay*(inputPath, outputPath, fontPath: string): OverlayStats =
   let yoloInput = image.prepareYoloInput()
   result.letterboxMs = elapsedMs(stageStart)
 
-  image.finishOverlay(yoloInput, outputPath, fontPath, result, totalStart)
+  image.finishOverlay(yoloInput, outputPath, fontPath, result, totalStart, resolveDrawOptionsFromJobOptions(options, false))
 
 proc useMp4OverlapPipeline(): bool =
   let raw = getEnv("HAILO_DEMO_MP4_OVERLAP", "1").toLowerAscii()
@@ -966,7 +1008,8 @@ proc drawMp4PreviewOverlayPipelined(inputPath, outputPath, fontPath: string): Ov
     outputPath,
     fontPath,
     result,
-    totalStart
+    totalStart,
+    resolveVideoDrawOptions()
   )
 
 proc drawMp4PreviewOverlayPipelineProbe(inputPath, outputPath, fontPath: string): OverlayStats =
@@ -1061,7 +1104,8 @@ proc drawMp4PreviewOverlayPipelineProbe(inputPath, outputPath, fontPath: string)
     outputPath,
     fontPath,
     result,
-    totalStart
+    totalStart,
+    resolveVideoDrawOptions()
   )
 
 
@@ -1080,17 +1124,38 @@ proc parseEnvInt(name: string; defaultValue: int): int =
   except ValueError:
     result = defaultValue
 
-proc resolveMp4VideoBitrateConfig(): int =
-  ## Return 0 for automatic bitrate selection.  A numeric value keeps the old
-  ## fixed-bitrate behavior.
-  let raw = getEnv("HAILO_DEMO_MP4_BITRATE", "auto").strip().toLowerAscii()
-  if raw.len == 0 or raw in ["auto", "adaptive"]:
-    return 0
+proc resolveMp4VideoBitrateConfig(options: JobOptions): VideoBitrateConfig =
+  ## A fixed bitrate keeps the old behavior.  Otherwise bitrate is selected from
+  ## output size/fps and optionally scaled by the Web UI quality preset.
+  result.fixedBitrate = 0
+  result.autoMultiplierPercent = 100
 
-  try:
-    result = max(1, parseInt(raw))
-  except ValueError:
-    result = 0
+  case options.mp4Quality
+  of mpqSmall:
+    result.autoMultiplierPercent = 65
+  of mpqBalanced:
+    result.autoMultiplierPercent = 100
+  of mpqHigh:
+    result.autoMultiplierPercent = 150
+  of mpqManual:
+    if options.manualBitrate > 0:
+      result.fixedBitrate = options.manualBitrate
+    else:
+      result.autoMultiplierPercent = 100
+  of mpqAuto:
+    let raw = getEnv("HAILO_DEMO_MP4_BITRATE", "auto").strip().toLowerAscii()
+    if raw.len > 0 and raw notin ["auto", "adaptive"]:
+      try:
+        result.fixedBitrate = max(1, parseInt(raw))
+      except ValueError:
+        result.fixedBitrate = 0
+
+proc clampBitrate(value: int): int =
+  result = value
+  if result < 250_000:
+    result = 250_000
+  if result > 20_000_000:
+    result = 20_000_000
 
 proc autoMp4VideoBitrate(width, height, fps: int): int =
   ## Pick a conservative H.264 bitrate from output frame size.
@@ -1108,17 +1173,20 @@ proc autoMp4VideoBitrate(width, height, fps: int): int =
     pixels = float(safeWidth) * float(safeHeight)
     bitsPerPixelFrame = 0.064
     raw = int(pixels * float(safeFps) * bitsPerPixelFrame + 0.5)
+    minAuto = if safeWidth * safeHeight >= 1280 * 720: 2_000_000 else: 1_000_000
 
   result = raw
-  if result < 1_000_000:
-    result = 1_000_000
+  if result < minAuto:
+    result = minAuto
   if result > 20_000_000:
     result = 20_000_000
 
-proc resolveMp4VideoBitrate(width, height, fps, configValue: int): int =
-  if configValue > 0:
-    return configValue
-  result = autoMp4VideoBitrate(width, height, fps)
+proc resolveMp4VideoBitrate(width, height, fps: int; config: VideoBitrateConfig): int =
+  if config.fixedBitrate > 0:
+    return config.fixedBitrate.clampBitrate()
+
+  let base = autoMp4VideoBitrate(width, height, fps)
+  result = int(float(base) * float(config.autoMultiplierPercent) / 100.0 + 0.5).clampBitrate()
 
 proc resolveMp4VideoEncoderName(): string =
   result = getEnv("HAILO_DEMO_MP4_ENCODER", "h264_v4l2m2m").strip()
@@ -1358,11 +1426,12 @@ type
     fpsDen: int
     fpsForBitrate: int
     gopSize: int
-    bitrate: int
+    bitrateConfig: VideoBitrateConfig
     previewFrameNumber: int
     encoderName: SharedCString
     maxFrames: int
     progressInfo: VideoProgressInfo
+    options: JobOptions
 
 proc `=destroy`(self: var VideoPipelineItem) {.raises: [].} =
   ## VideoPipelineItem can carry an active Pooled[OwnedRGBXFrame].  Make the
@@ -1623,7 +1692,7 @@ proc videoPipelineConsumerMain(state: VideoPipelineWorkerState) {.thread.} =
       fontPath = state.fontPath.toLocalString()
       encoderName = state.encoderName.toLocalString()
       loadedFont = loadOverlayFont(fontPath)
-      drawOptions = resolveVideoDrawOptions()
+      drawOptions = resolveDrawOptionsFromJobOptions(state.options, true)
     var
       encoder: VideoEncoder
       writer: Mp4VideoWriter
@@ -1646,7 +1715,7 @@ proc videoPipelineConsumerMain(state: VideoPipelineWorkerState) {.thread.} =
               frameH = item.rgbx.value.height
               encoderHeight = alignUp(frameH, 16)
 
-            let actualBitrate = resolveMp4VideoBitrate(frameW, frameH, state.fpsForBitrate, state.bitrate)
+            let actualBitrate = resolveMp4VideoBitrate(frameW, frameH, state.fpsForBitrate, state.bitrateConfig)
             workerResult.stats.outputBitrate = actualBitrate
 
             var stageStart = epochTime()
@@ -1790,6 +1859,7 @@ proc mergeThreadedVideoStats(result: var OverlayStats; workerStats: OverlayStats
 proc drawMp4VideoOverlayThreaded(
     inputPath, outputPath, fontPath: string;
     previewOutputPath = "";
+    options: JobOptions = defaultJobOptions();
     onProgress: OverlayProgressCallback = nil;
     progressCtx: pointer = nil
   ): OverlayStats =
@@ -1802,7 +1872,7 @@ proc drawMp4VideoOverlayThreaded(
   ## and encodes.  This hides overlay/encode work behind the next frame's decode
   ## and preprocessing, while keeping the HAILO worker itself unchanged.
   let totalStart = epochTime()
-  let bitrateConfig = resolveMp4VideoBitrateConfig()
+  let bitrateConfig = resolveMp4VideoBitrateConfig(options)
   let maxFrames = parseEnvInt("HAILO_DEMO_MP4_VIDEO_MAX_FRAMES", 90)
   let encoderName = resolveMp4VideoEncoderName()
   let maxInFlight = resolveMp4VideoInFlight()
@@ -1859,11 +1929,12 @@ proc drawMp4VideoOverlayThreaded(
       fpsDen: outputFps.den,
       fpsForBitrate: outputFps.fpsForBitrate,
       gopSize: outputFps.gopSize,
-      bitrate: bitrateConfig,
+      bitrateConfig: bitrateConfig,
       previewFrameNumber: previewFrameNumber,
       encoderName: sharedEncoderName,
       maxFrames: maxFrames,
-      progressInfo: progressInfo
+      progressInfo: progressInfo,
+      options: options
     )
     createThread(consumerThread, videoPipelineConsumerMain, workerState)
     consumerStarted = true
@@ -1996,6 +2067,7 @@ proc drawMp4VideoOverlayThreaded(
 proc drawMp4VideoOverlayLookahead(
     inputPath, outputPath, fontPath: string;
     previewOutputPath = "";
+    options: JobOptions = defaultJobOptions();
     onProgress: OverlayProgressCallback = nil;
     progressCtx: pointer = nil
   ): OverlayStats =
@@ -2007,13 +2079,13 @@ proc drawMp4VideoOverlayLookahead(
   ## overlay/encode into independent threadtools queues without changing the
   ## web-facing job contract.
   let totalStart = epochTime()
-  let bitrateConfig = resolveMp4VideoBitrateConfig()
+  let bitrateConfig = resolveMp4VideoBitrateConfig(options)
   let maxFrames = parseEnvInt("HAILO_DEMO_MP4_VIDEO_MAX_FRAMES", 90)
   let encoderName = resolveMp4VideoEncoderName()
   let maxInFlight = resolveMp4VideoInFlight()
   let previewFrameNumber = resolveVideoPreviewFrame()
   let loadedFont = loadOverlayFont(fontPath)
-  let drawOptions = resolveVideoDrawOptions()
+  let drawOptions = resolveDrawOptionsFromJobOptions(options, true)
   result.pipelineInFlight = maxInFlight
 
   var reader = openMp4PreviewDecoder(inputPath)
@@ -2173,6 +2245,7 @@ proc drawMp4VideoOverlayLookahead(
 proc drawMp4VideoOverlay*(
     inputPath, outputPath, fontPath: string;
     previewOutputPath = "";
+    options: JobOptions = defaultJobOptions();
     onProgress: OverlayProgressCallback = nil;
     progressCtx: pointer = nil
   ): OverlayStats =
@@ -2182,6 +2255,7 @@ proc drawMp4VideoOverlay*(
       outputPath,
       fontPath,
       previewOutputPath,
+      options,
       onProgress,
       progressCtx
     )
@@ -2191,6 +2265,7 @@ proc drawMp4VideoOverlay*(
     outputPath,
     fontPath,
     previewOutputPath,
+    options,
     onProgress,
     progressCtx
   )
@@ -2224,4 +2299,4 @@ proc drawMp4PreviewOverlay*(inputPath, outputPath, fontPath: string): OverlaySta
   result.rgbxMs = preview.rgbxMs
   result.drawMs = preview.rgbxMs
 
-  image.finishOverlay(preview.yoloInput, outputPath, fontPath, result, totalStart)
+  image.finishOverlay(preview.yoloInput, outputPath, fontPath, result, totalStart, resolveVideoDrawOptions())

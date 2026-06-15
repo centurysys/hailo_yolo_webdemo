@@ -29,7 +29,8 @@ proc createJob*(
   kind: JobKind,
   inputPath: string,
   outputPath: string,
-  originalName: string
+  originalName: string,
+  options: JobOptions = defaultJobOptions()
 ): JobInfo =
   let t = nowUnix()
   result = JobInfo(
@@ -39,6 +40,7 @@ proc createJob*(
     inputPath: inputPath,
     outputPath: outputPath,
     originalName: originalName,
+    options: options,
     message: "queued",
     detailMessage: "",
     progress: 0,

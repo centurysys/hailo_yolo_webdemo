@@ -21,10 +21,11 @@ proc htmlEscape*(s: string): string =
 proc demoCss*(): string =
   """
 :root { color-scheme: light dark; }
+[hidden] { display: none !important; }
 body { max-width: 960px; margin: 0 auto; padding: 2rem 1rem; font-family: system-ui, sans-serif; }
 header { margin-bottom: 1.5rem; }
 article { border: 1px solid #d0d7de; border-radius: 0.75rem; padding: 1rem; margin: 1rem 0; }
-button, input[type=file] { font: inherit; }
+button, input, select { font: inherit; }
 button { padding: 0.55rem 1rem; border-radius: 0.4rem; border: 1px solid #0969da; background: #0969da; color: white; cursor: pointer; }
 button[disabled] { opacity: 0.55; cursor: wait; }
 progress { width: 100%; height: 1rem; }
@@ -38,6 +39,30 @@ progress { width: 100%; height: 1rem; }
 .details-log { white-space: pre-wrap; overflow-wrap: anywhere; font-size: 0.85rem; line-height: 1.45; max-height: 18rem; overflow: auto; border: 1px solid #d0d7de; border-radius: 0.5rem; padding: 0.75rem; }
 .result-actions { margin-top: 1rem; }
 .row { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; }
+.upload-form { display: grid; gap: 1.1rem; }
+.file-row { display: grid; gap: 0.35rem; }
+.options-panel { margin-top: 0.25rem; }
+.options-panel h3 { margin: 0 0 0.8rem; }
+.options-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.9rem; align-items: start; }
+.option-card { border: 1px solid color-mix(in srgb, CanvasText 18%, Canvas); border-radius: 0.65rem; padding: 0.85rem; background: color-mix(in srgb, CanvasText 3%, Canvas); }
+.option-card label, .manual-extra label, .advanced-grid label { display: grid; gap: 0.35rem; margin: 0; }
+.option-card select, .option-card input, .manual-extra input, .advanced-grid input { width: 100%; box-sizing: border-box; }
+.option-title { font-weight: 700; margin-bottom: 0.45rem; }
+.option-note { display: block; font-size: 0.88rem; line-height: 1.45; margin-top: 0.45rem; }
+.manual-extra { margin-top: 0.75rem; padding-top: 0.75rem; border-top: 1px solid color-mix(in srgb, CanvasText 14%, Canvas); }
+.advanced-options { margin-top: 0.9rem; border: 1px solid color-mix(in srgb, CanvasText 14%, Canvas); border-radius: 0.65rem; padding: 0.75rem 0.85rem; }
+.advanced-options summary { cursor: pointer; font-weight: 700; }
+.advanced-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 0.75rem; margin-top: 0.75rem; }
+.form-actions { display: flex; gap: 0.75rem; align-items: center; flex-wrap: wrap; margin-top: 0.1rem; }
+#message { margin: 0; }
+@media (max-width: 720px) {
+  body { padding: 1rem 0.75rem; }
+  .options-grid { grid-template-columns: 1fr; }
+  .advanced-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 480px) {
+  .advanced-grid { grid-template-columns: 1fr; }
+}
 """
 
 proc renderLayout*(title, body: string): string =
@@ -67,17 +92,114 @@ proc renderIndexPage*(): string =
 <article>
   <h2>Upload</h2>
   <p class="muted">JPEGはHAILO-8L上のYOLOv11sで検出し、bbox/label付きJPEGを生成します。MP4は各フレームにYOLO検出結果をoverlayし、bbox/label付きH.264/MP4を生成します。</p>
-  <form id="upload-form">
-    <input id="file" type="file" accept=".jpg,.jpeg,.mp4,.m4v" required>
-    <button id="run" type="submit">Upload and Run</button>
+  <form id="upload-form" class="upload-form">
+    <label class="file-row">
+      <span>Input file</span>
+      <input id="file" type="file" accept=".jpg,.jpeg,.mp4,.m4v" required>
+    </label>
+
+    <section class="options-panel" aria-labelledby="processing-options-title">
+      <h3 id="processing-options-title">Processing options</h3>
+
+      <div class="options-grid">
+        <div class="option-card">
+          <div class="option-title">MP4 quality</div>
+          <label>
+            <span class="muted">出力MP4の画質</span>
+            <select id="mp4-quality">
+              <option value="auto" selected>Auto</option>
+              <option value="small">Small file</option>
+              <option value="balanced">Balanced</option>
+              <option value="high">High quality</option>
+              <option value="manual">Manual</option>
+            </select>
+          </label>
+          <span class="muted option-note">ブロックノイズが気になる場合は High quality を選びます。</span>
+
+          <div id="manual-bitrate-row" class="manual-extra" hidden>
+            <label>
+              Manual bitrate (Mbps)
+              <input id="manual-bitrate" type="number" min="0.25" max="20" step="0.25" value="4">
+            </label>
+          </div>
+        </div>
+
+        <div class="option-card">
+          <div class="option-title">Overlay amount</div>
+          <label>
+            <span class="muted">bbox / label の表示量</span>
+            <select id="overlay-preset">
+              <option value="light">Light</option>
+              <option value="balanced" selected>Balanced</option>
+              <option value="rich">Rich</option>
+              <option value="boxes-only">Boxes only</option>
+              <option value="manual">Manual</option>
+            </select>
+          </label>
+          <span class="muted option-note">多すぎる場合は Light または Boxes only が見やすいです。</span>
+        </div>
+      </div>
+
+      <details id="advanced-options" class="advanced-options">
+        <summary>Advanced overlay thresholds</summary>
+        <div class="advanced-grid">
+          <label>
+            Max boxes
+            <input id="max-boxes" type="number" min="0" max="200" step="1" value="12">
+          </label>
+          <label>
+            Max labels
+            <input id="max-labels" type="number" min="0" max="200" step="1" value="6">
+          </label>
+          <label>
+            Box score threshold
+            <input id="min-box-score" type="number" min="0" max="1" step="0.05" value="0.25">
+          </label>
+          <label>
+            Label score threshold
+            <input id="min-label-score" type="number" min="0" max="1" step="0.05" value="0.50">
+          </label>
+        </div>
+      </details>
+    </section>
+
+    <div class="form-actions">
+      <button id="run" type="submit">Upload and Run</button>
+      <p id="message" class="muted"></p>
+    </div>
   </form>
-  <p id="message" class="muted"></p>
 </article>
 <script>
 const form = document.getElementById('upload-form');
 const fileInput = document.getElementById('file');
 const button = document.getElementById('run');
 const message = document.getElementById('message');
+const mp4Quality = document.getElementById('mp4-quality');
+const manualBitrateRow = document.getElementById('manual-bitrate-row');
+const manualBitrate = document.getElementById('manual-bitrate');
+const overlayPreset = document.getElementById('overlay-preset');
+const advancedOptions = document.getElementById('advanced-options');
+
+function refreshOptionVisibility() {
+  manualBitrateRow.hidden = mp4Quality.value !== 'manual';
+  if (overlayPreset.value === 'manual') {
+    advancedOptions.open = true;
+  }
+}
+
+mp4Quality.addEventListener('change', refreshOptionVisibility);
+overlayPreset.addEventListener('change', refreshOptionVisibility);
+refreshOptionVisibility();
+
+function appendOptions(url) {
+  url.searchParams.set('mp4Quality', mp4Quality.value);
+  url.searchParams.set('manualBitrateMbps', manualBitrate.value);
+  url.searchParams.set('overlayPreset', overlayPreset.value);
+  url.searchParams.set('maxBoxes', document.getElementById('max-boxes').value);
+  url.searchParams.set('maxLabels', document.getElementById('max-labels').value);
+  url.searchParams.set('minBoxScore', document.getElementById('min-box-score').value);
+  url.searchParams.set('minLabelScore', document.getElementById('min-label-score').value);
+}
 
 form.addEventListener('submit', async (event) => {
   event.preventDefault();
@@ -88,8 +210,10 @@ form.addEventListener('submit', async (event) => {
   message.textContent = 'uploading...';
 
   try {
-    const url = '/upload?filename=' + encodeURIComponent(file.name);
-    const res = await fetch(url, { method: 'PUT', body: file });
+    const url = new URL('/upload', location.origin);
+    url.searchParams.set('filename', file.name);
+    appendOptions(url);
+    const res = await fetch(url.pathname + url.search, { method: 'PUT', body: file });
     if (!res.ok) {
       throw new Error(await res.text());
     }

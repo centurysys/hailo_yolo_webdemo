@@ -94,7 +94,7 @@ proc processJob(store: JobStore; jobId: string) {.gcsafe.} =
 
       var stats: OverlayStats
       {.cast(gcsafe).}:
-        stats = drawHailoOverlay(job.inputPath, job.outputPath, fontPath)
+        stats = drawHailoOverlay(job.inputPath, job.outputPath, fontPath, job.options)
 
       let
         message = stats.formatOverlaySummary()
@@ -120,6 +120,7 @@ proc processJob(store: JobStore; jobId: string) {.gcsafe.} =
           job.outputPath,
           fontPath,
           previewPath(jobsDir, jobId),
+          job.options,
           updateJobProgressFromOverlay,
           addr progressCtx
         )
