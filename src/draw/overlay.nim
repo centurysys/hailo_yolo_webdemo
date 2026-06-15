@@ -5,7 +5,7 @@
 ## build the YOLO input directly from that I420 frame.
 
 import pixie
-import std/[math, os, strformat, times]
+import std/[math, os, strformat, strutils, times]
 
 import ../infer/hailo_worker
 import ../media/[convert, jpeg, mp4]
@@ -32,6 +32,9 @@ type
     decodeMs*: int
     decoderOpenMs*: int
     readFrameMs*: int
+    readFramesMs*: seq[int]
+    previewFrameIndex*: int
+    requestedProbeFrames*: int
     decoderName*: string
     letterboxMs*: int
     inferMs*: int
@@ -45,6 +48,16 @@ proc elapsedMs(start: float): int =
   if result < 0:
     result = 0
 
+proc formatReadFramesMs(values: openArray[int]): string =
+  if values.len == 0:
+    return ""
+
+  var parts: seq[string] = @[]
+  for value in values:
+    parts.add($value)
+
+  result = parts.join("/")
+
 proc formatOverlayStats*(s: OverlayStats): string =
   let base = &"detections={s.detections}, labels={s.labelsDrawn}, image={s.imageWidth}x{s.imageHeight}, total={s.totalMs} ms "
 
@@ -52,8 +65,12 @@ proc formatOverlayStats*(s: OverlayStats): string =
     let
       overlayMs = max(0, s.drawMs - s.rgbxMs)
       decoderLabel = if s.decoderName.len > 0: s.decoderName else: "auto"
+      readDetail = if s.readFramesMs.len > 1:
+          &"reads={formatReadFramesMs(s.readFramesMs)}, frame={s.previewFrameIndex}"
+        else:
+          &"read={s.readFrameMs}"
     result = base &
-      &"(decode={s.decodeMs}[decoder={decoderLabel}, open={s.decoderOpenMs}, read={s.readFrameMs}], " &
+      &"(decode={s.decodeMs}[decoder={decoderLabel}, open={s.decoderOpenMs}, {readDetail}], " &
       &"letterbox={s.letterboxMs}, infer={s.inferMs}, " &
       &"draw={s.drawMs}[rgbx={s.rgbxMs}, overlay={overlayMs}], encode={s.encodeMs})"
   else:
@@ -203,6 +220,9 @@ proc drawMp4PreviewOverlay*(inputPath, outputPath, fontPath: string): OverlaySta
   result.decodeMs = preview.decodeMs
   result.decoderOpenMs = preview.decoderOpenMs
   result.readFrameMs = preview.readFrameMs
+  result.readFramesMs = preview.readFramesMs
+  result.previewFrameIndex = preview.frameIndex
+  result.requestedProbeFrames = preview.requestedProbeFrames
   result.decoderName = preview.decoderName
   result.letterboxMs = preview.letterboxMs
   result.rgbxMs = preview.rgbxMs

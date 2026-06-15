@@ -5,7 +5,7 @@
 ## and also converts the same frame into a Pixie RGBX image for overlay drawing.
 
 import pixie
-import std/[os, strformat, times]
+import std/[os, strformat, strutils, times]
 
 import libav_nim
 
@@ -13,6 +13,7 @@ import ./convert
 
 const
   DefaultMp4DecoderName = "h264_v4l2m2m"
+  DefaultMp4ProbeFrames = 3
 
 type
   PixelSeqHolder = ref object
@@ -27,6 +28,9 @@ type
     decodeMs*: int
     decoderOpenMs*: int
     readFrameMs*: int
+    readFramesMs*: seq[int]
+    requestedProbeFrames*: int
+    actualProbeFrames*: int
     letterboxMs*: int
     rgbxMs*: int
     frameWidth*: int
@@ -52,6 +56,22 @@ proc resolveMp4DecoderName(requested: string): string =
     result = ""
   else:
     result = envName
+
+proc resolveMp4ProbeFrames(): int =
+  ## Read a few frames with the same decoder instance so one-time setup cost and
+  ## steady-state read/decode cost can be seen separately.
+  ##
+  ## HAILO_DEMO_MP4_PROBE_FRAMES=1 restores the old first-frame-only behavior.
+  let raw = getEnv("HAILO_DEMO_MP4_PROBE_FRAMES", $DefaultMp4ProbeFrames)
+  try:
+    result = parseInt(raw)
+  except ValueError:
+    result = DefaultMp4ProbeFrames
+
+  if result < 1:
+    result = 1
+  if result > 30:
+    result = 30
 
 proc checkAv[T](ret: FFmpegResult[T]; context: string): T =
   if ret.isErr:
@@ -107,22 +127,43 @@ proc decodeMp4PreviewFrame*(inputPath: string; decoderName = ""): Mp4PreviewFram
   result.decoderOpenMs = elapsedMs(stageStart)
   defer: decoder.close()
 
-  stageStart = epochTime()
-  let read = checkAv(decoder.readFrame(), "readFrame")
-  result.readFrameMs = elapsedMs(stageStart)
-  if read.eof:
+  let requestedProbeFrames = resolveMp4ProbeFrames()
+  result.requestedProbeFrames = requestedProbeFrames
+  result.readFramesMs = @[]
+
+  var
+    selectedRead: ReadFrame
+    selectedFrameIndex = -1
+
+  for i in 0 ..< requestedProbeFrames:
+    stageStart = epochTime()
+    let read = checkAv(decoder.readFrame(), &"readFrame#{i}")
+    let readMs = elapsedMs(stageStart)
+
+    if read.eof:
+      if selectedFrameIndex < 0:
+        raise newException(IOError, &"MP4 has no decodable video frame: {inputPath}")
+      break
+
+    result.readFramesMs.add(readMs)
+    result.readFrameMs += readMs
+    selectedRead = read
+    selectedFrameIndex = i
+
+  if selectedFrameIndex < 0:
     raise newException(IOError, &"MP4 has no decodable video frame: {inputPath}")
 
   result.decodeMs = elapsedMs(totalStart)
   result.decoderName = actualDecoderName
-  result.frameIndex = 0
-  result.frameWidth = read.frame.width
-  result.frameHeight = read.frame.height
+  result.frameIndex = selectedFrameIndex
+  result.actualProbeFrames = result.readFramesMs.len
+  result.frameWidth = selectedRead.frame.width
+  result.frameHeight = selectedRead.frame.height
 
   stageStart = epochTime()
-  result.yoloInput = read.frame.prepareYoloInput()
+  result.yoloInput = selectedRead.frame.prepareYoloInput()
   result.letterboxMs = elapsedMs(stageStart)
 
   stageStart = epochTime()
-  result.image = read.frame.yuv420FrameToPixieImage()
+  result.image = selectedRead.frame.yuv420FrameToPixieImage()
   result.rgbxMs = elapsedMs(stageStart)
