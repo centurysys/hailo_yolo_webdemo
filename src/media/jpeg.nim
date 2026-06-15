@@ -1,15 +1,48 @@
 ## JPEG helpers.
 ##
-## Pixie is used for image drawing, but Pixie does not encode JPEG output.
-## Keep JPEG output behind this small wrapper so the drawing layer does not
-## depend on encoder details.
+## TurboJPEG/libjpeg-turbo is used for JPEG input decode because Pixie's
+## readImage() path is too slow for the single-image inference demo.  Output is
+## still handled by hyper_jpeg, which is already fast on the target platform.
 
 import std/strformat
 
 import hyper_jpeg
+import libturbojpeg_nim
 import pixie
 
 const DefaultJpegQuality* = 90
+
+type
+  PixelSeqHolder = ref object
+    data: seq[PixelRGBX]
+
+  ColorSeqHolder = ref object
+    data: seq[ColorRGBX]
+
+proc movePixelsToColorSeq(data: sink seq[PixelRGBX]): seq[ColorRGBX] =
+  ## PixelRGBX and Pixie ColorRGBX are both 4-byte RGBX layouts.
+  ## Move ownership of the decoded TurboJPEG buffer into Pixie without copying.
+  static:
+    doAssert sizeof(PixelRGBX) == 4
+    doAssert sizeof(ColorRGBX) == 4
+
+  var src = PixelSeqHolder(data: data)
+  var dst = cast[ColorSeqHolder](src)
+  result = move dst.data
+
+proc readJpegToPixieImage*(inputPath: string): Image =
+  let readRes = readJpegRgbx(inputPath)
+  if readRes.isErr:
+    raise newException(IOError, &"failed to decode JPEG with TurboJPEG: {readRes.error.msg}")
+
+  var rgbx = readRes.get()
+  if not rgbx.isValid:
+    raise newException(IOError, &"decoded JPEG image is invalid: {inputPath}")
+
+  result = Image()
+  result.width = rgbx.width
+  result.height = rgbx.height
+  result.data = movePixelsToColorSeq(move rgbx.data)
 
 proc encodeImageToJpeg*(image: Image; outputPath: string; quality = DefaultJpegQuality) =
   if image.isNil:

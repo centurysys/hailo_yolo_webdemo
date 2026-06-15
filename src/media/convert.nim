@@ -83,7 +83,11 @@ proc describe*(info: YoloLetterboxInfo): string =
     &"offset=({info.offsetX},{info.offsetY}) " &
     &"scale=({info.scaleX:.6f},{info.scaleY:.6f})"
 
-proc pixieToLibyuvRgba*(image: Image): RgbaImage =
+proc pixieToLibyuvRgbaView*(image: Image): RgbaView =
+  ## Borrow Pixie's RGBX/RGBA memory as a libyuv_nim RGBA view.
+  ##
+  ## The view does not own memory.  The caller must keep `image` alive while
+  ## libyuv operates on this view.
   if image.isNil:
     raise newException(ValueError, "image is nil")
   if image.width <= 0 or image.height <= 0:
@@ -91,37 +95,46 @@ proc pixieToLibyuvRgba*(image: Image): RgbaImage =
   if image.data.len == 0:
     raise newException(ValueError, "image has no pixel data")
 
-  let allocRes = allocRgbaImage(image.width, image.height)
-  if allocRes.isErr:
-    raise newException(ValueError, $allocRes.error)
+  result = RgbaView(
+    width: image.width,
+    height: image.height,
+    stride: image.width * 4,
+    data: cast[ptr uint8](unsafeAddr image.data[0])
+  )
 
-  result = allocRes.get()
-
-  let byteLen = image.width * image.height * 4
-  copyMem(
-    addr result.data[0],
-    unsafeAddr image.data[0],
-    byteLen
+proc rgbImageView(image: var RgbImage): RgbView =
+  result = RgbView(
+    width: image.width,
+    height: image.height,
+    stride: image.stride,
+    data: if image.data.len == 0: nil else: addr image.data[0]
   )
 
 proc prepareYoloInput*(image: Image): YoloInputImage =
   ## Generate a 640x640 RGB24/NHWC3 YOLO input image using libyuv_nim.
   ##
-  ## This currently copies Pixie's RGBA buffer into libyuv_nim's RgbaImage.
-  ## Later, JPEG decode can target this buffer more directly if needed.
-  let rgba = image.pixieToLibyuvRgba()
-  let lbRes = rgba.toRgbLetterbox(
-    dstWidth = YoloInputW,
-    dstHeight = YoloInputH,
-    padValue = YoloPadValue
+  ## This version borrows Pixie's RGBX/RGBA backing buffer directly instead of
+  ## copying it into a temporary libyuv_nim RgbaImage first.  This is especially
+  ## useful after TurboJPEG decode, where the JPEG decoder buffer is moved into
+  ## Pixie without copying.
+  let srcView = image.pixieToLibyuvRgbaView()
+
+  let allocRes = allocRgbImage(YoloInputW, YoloInputH)
+  if allocRes.isErr:
+    raise newException(ValueError, $allocRes.error)
+
+  var dst = allocRes.get()
+  var dstView = dst.rgbImageView()
+  let lbRes = srcView.toRgbLetterboxInto(
+    dstView,
+    RgbPadColor(r: YoloPadValue, g: YoloPadValue, b: YoloPadValue)
   )
   if lbRes.isErr:
     raise newException(ValueError, $lbRes.error)
 
-  let lb = lbRes.get()
   result = YoloInputImage(
-    rgb: lb.image,
-    info: lb.info.toYoloInfo()
+    rgb: dst,
+    info: lbRes.get().toYoloInfo()
   )
 
 proc inputBufferLen*(input: YoloInputImage): int =

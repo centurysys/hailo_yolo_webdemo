@@ -122,7 +122,7 @@ proc drawHailoOverlay*(inputPath, outputPath, fontPath: string): OverlayStats =
   let totalStart = epochTime()
 
   var stageStart = epochTime()
-  var image = readImage(inputPath)
+  var image = readJpegToPixieImage(inputPath)
   result.decodeMs = elapsedMs(stageStart)
   result.imageWidth = image.width
   result.imageHeight = image.height
