@@ -8,6 +8,7 @@ import pixie
 import std/[os, strformat, strutils, times]
 
 import libav_nim
+import libav_nim/lowlevel/bindings/c_api
 
 import ./convert
 
@@ -16,6 +17,25 @@ const
   DefaultMp4ProbeFrames = 3
 
 type
+  Mp4InputInfo* = object
+    ## Best-effort metadata from the MP4 container/video stream.
+    ##
+    ## durationSeconds/sourceFps/estimatedTotalFrames are intentionally
+    ## best-effort values.  They are useful for progress reporting, but callers
+    ## should continue to handle EOF as the source of truth.
+    durationSeconds*: float64
+    hasDuration*: bool
+    durationSource*: string
+    sourceFps*: float64
+    sourceFpsNum*: int
+    sourceFpsDen*: int
+    hasSourceFps*: bool
+    fpsSource*: string
+    nbFrames*: int64
+    hasNbFrames*: bool
+    estimatedTotalFrames*: int
+    hasEstimatedTotalFrames*: bool
+
   PixelSeqHolder = ref object
     data: seq[PixelRGBX]
 
@@ -25,6 +45,7 @@ type
   Mp4PreviewFrame* = object
     image*: Image
     yoloInput*: YoloInputImage
+    inputInfo*: Mp4InputInfo
     decodeMs*: int
     decoderOpenMs*: int
     readFrameMs*: int
@@ -35,6 +56,8 @@ type
     rgbxMs*: int
     frameWidth*: int
     frameHeight*: int
+    timestampSeconds*: float64
+    hasTimestampSeconds*: bool
     decoderName*: string
     frameIndex*: int
 
@@ -46,6 +69,7 @@ type
     ## Call close() after all conversions for the selected frame are complete.
     decoder*: VideoDecoder
     read*: ReadFrame
+    inputInfo*: Mp4InputInfo
     decodeMs*: int
     decoderOpenMs*: int
     readFrameMs*: int
@@ -65,6 +89,7 @@ type
     ## readNextFrame() again.
     decoder*: VideoDecoder
     decoderOpenMs*: int
+    inputInfo*: Mp4InputInfo
     decoderName*: string
     nextFrameIndex*: int
 
@@ -79,6 +104,8 @@ type
     frameIndex*: int
     frameWidth*: int
     frameHeight*: int
+    timestampSeconds*: float64
+    hasTimestampSeconds*: bool
 
 proc elapsedMs(start: float): int =
   result = int((epochTime() - start) * 1000.0 + 0.5)
@@ -128,6 +155,111 @@ proc checkAv(ret: FFmpegResult[void]; context: string) =
   if ret.isErr:
     raise newException(IOError, &"{context}: {ret.error.message}")
 
+proc rationalToFloat(value: Rational): float64 =
+  if value.den == 0:
+    return 0.0
+  result = float64(value.num) / float64(value.den)
+
+proc avRationalToFloat(value: AVRational): float64 =
+  if value.den == 0:
+    return 0.0
+  result = float64(value.num) / float64(value.den)
+
+proc setSourceFpsFromRational(info: var Mp4InputInfo; value: AVRational; source: string): bool =
+  let fps = avRationalToFloat(value)
+  if fps <= 0.0:
+    return false
+
+  info.sourceFps = fps
+  info.sourceFpsNum = int(value.num)
+  info.sourceFpsDen = int(value.den)
+  info.hasSourceFps = true
+  info.fpsSource = source
+  result = true
+
+proc streamDurationSeconds(stream: AVStreamPtr; seconds: var float64): bool =
+  if stream.isNil:
+    return false
+  if stream[].duration <= 0 or stream[].duration == avNoPtsValue:
+    return false
+
+  let timeBase = stream[].time_base.toRational()
+  if timeBase.den == 0:
+    return false
+
+  seconds = float64(stream[].duration) * rationalToFloat(timeBase)
+  result = seconds > 0.0
+
+proc formatDurationSeconds(ctx: AVFormatContextPtr; seconds: var float64): bool =
+  if ctx.isNil:
+    return false
+  if ctx[].duration <= 0 or ctx[].duration == avNoPtsValue:
+    return false
+
+  seconds = float64(ctx[].duration) / float64(AV_TIME_BASE)
+  result = seconds > 0.0
+
+proc videoStreamPtr(decoder: VideoDecoder): AVStreamPtr =
+  if decoder.isNil or decoder.fmtCtx.isNil:
+    return nil
+
+  if decoder.videoStreamIndex < 0 or decoder.videoStreamIndex >= int(decoder.fmtCtx[].nb_streams):
+    return nil
+
+  let streams = cast[ptr UncheckedArray[AVStreamPtr]](decoder.fmtCtx[].streams)
+  result = streams[decoder.videoStreamIndex]
+
+proc finalizeEstimatedTotalFrames(info: var Mp4InputInfo) =
+  if info.hasNbFrames and info.nbFrames > 0 and info.nbFrames <= int64(high(int)):
+    info.estimatedTotalFrames = int(info.nbFrames)
+    info.hasEstimatedTotalFrames = true
+    return
+
+  if info.hasDuration and info.hasSourceFps and info.durationSeconds > 0.0 and info.sourceFps > 0.0:
+    let estimated = int(info.durationSeconds * info.sourceFps + 0.5)
+    if estimated > 0:
+      info.estimatedTotalFrames = estimated
+      info.hasEstimatedTotalFrames = true
+
+proc readMp4InputInfo*(decoder: VideoDecoder): Mp4InputInfo =
+  ## Read best-effort duration/fps/frame-count metadata from the opened input.
+  ##
+  ## This is meant for progress reporting and reasonable defaults.  Containers
+  ## are allowed to omit or approximate these values, so EOF remains the source
+  ## of truth for actual processing.
+  let stream = decoder.videoStreamPtr()
+
+  if not stream.isNil:
+    var seconds = 0.0
+    if stream.streamDurationSeconds(seconds):
+      result.durationSeconds = seconds
+      result.hasDuration = true
+      result.durationSource = "stream.duration"
+
+    if stream[].nb_frames > 0:
+      result.nbFrames = stream[].nb_frames
+      result.hasNbFrames = true
+
+    if not result.setSourceFpsFromRational(stream[].avg_frame_rate, "avg_frame_rate"):
+      let guessed = av_guess_frame_rate(decoder.fmtCtx, stream, nil)
+      if not result.setSourceFpsFromRational(guessed, "av_guess_frame_rate"):
+        discard result.setSourceFpsFromRational(stream[].r_frame_rate, "r_frame_rate")
+
+  if not result.hasDuration:
+    var seconds = 0.0
+    if decoder.fmtCtx.formatDurationSeconds(seconds):
+      result.durationSeconds = seconds
+      result.hasDuration = true
+      result.durationSource = "format.duration"
+
+  result.finalizeEstimatedTotalFrames()
+
+proc timestampSecondsOf*(frame: Yuv420FrameView; seconds: var float64): bool =
+  ## Convert a decoded frame's best-effort presentation timestamp to seconds.
+  ## Hardware decoder paths may still produce missing/flat timestamps; callers
+  ## should fall back to frame index + source fps when this returns false.
+  result = frame.timestamp.timestampSeconds(seconds)
+
 proc movePixelsToColorSeq(data: sink seq[PixelRGBX]): seq[ColorRGBX] =
   ## libav_nim PixelRGBX and Pixie ColorRGBX are both 4-byte RGBX layouts.
   ## Move ownership of the converted full-frame RGBX buffer into Pixie without a
@@ -164,6 +296,7 @@ proc openMp4PreviewDecoder*(inputPath: string; decoderName = ""): Mp4PreviewDeco
     &"openVideoDecoder decoder={actualDecoderLabel}"
   )
   result.decoderOpenMs = elapsedMs(stageStart)
+  result.inputInfo = result.decoder.readMp4InputInfo()
   result.decoderName = actualDecoderName
   result.nextFrameIndex = 0
 
@@ -193,6 +326,10 @@ proc readNextFrame*(reader: var Mp4PreviewDecoder): Mp4FrameRead =
   result.read = read
   result.frameWidth = read.frame.width
   result.frameHeight = read.frame.height
+  var seconds = 0.0
+  if read.frame.timestampSecondsOf(seconds):
+    result.timestampSeconds = seconds
+    result.hasTimestampSeconds = true
   inc reader.nextFrameIndex
 
 proc close*(decoded: var Mp4DecodedFrame) =
@@ -216,6 +353,7 @@ proc openMp4PreviewDecodedFrame*(inputPath: string; decoderName = ""): Mp4Decode
     &"openVideoDecoder decoder={actualDecoderLabel}"
   )
   result.decoderOpenMs = elapsedMs(stageStart)
+  result.inputInfo = result.decoder.readMp4InputInfo()
 
   try:
     let requestedProbeFrames = resolveMp4ProbeFrames()
@@ -265,6 +403,7 @@ proc decodeMp4PreviewFrame*(inputPath: string; decoderName = ""): Mp4PreviewFram
   var decoded = openMp4PreviewDecodedFrame(inputPath, decoderName)
   defer: decoded.close()
 
+  result.inputInfo = decoded.inputInfo
   result.decodeMs = decoded.decodeMs
   result.decoderOpenMs = decoded.decoderOpenMs
   result.readFrameMs = decoded.readFrameMs
@@ -273,6 +412,10 @@ proc decodeMp4PreviewFrame*(inputPath: string; decoderName = ""): Mp4PreviewFram
   result.actualProbeFrames = decoded.actualProbeFrames
   result.frameWidth = decoded.frameWidth
   result.frameHeight = decoded.frameHeight
+  var seconds = 0.0
+  if decoded.read.frame.timestampSecondsOf(seconds):
+    result.timestampSeconds = seconds
+    result.hasTimestampSeconds = true
   result.decoderName = decoded.decoderName
   result.frameIndex = decoded.frameIndex
 

@@ -103,7 +103,11 @@ proc processJob(store: JobStore; jobId: string) {.gcsafe.} =
       store.setDone(jobId, message, detailMessage)
 
     of jkMp4:
-      store.updateJob(jobId, jsRunning, 20, "running MP4 decode / HAILO / overlay / H.264 encode")
+      ## MP4 progress is reported by drawMp4VideoOverlay() as the ratio of
+      ## encoded video work.  Do not reserve artificial setup/finalize progress
+      ## ranges here; otherwise the wait page appears to start or stop at odd
+      ## positions even when setup/finalize are very short.
+      store.updateJob(jobId, jsRunning, 0, "processing MP4 video")
 
       var stats: OverlayStats
       var progressCtx = JobProgressCtx(

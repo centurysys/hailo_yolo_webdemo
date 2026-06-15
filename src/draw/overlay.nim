@@ -26,6 +26,13 @@ const
   MinLabelBoxArea = 3000.float32
   MaxLabels = 12
 
+  ## MP4 progress represents encoded video work only.
+  ## Setup/open/finalize phases are intentionally not mapped to artificial
+  ## progress ranges, because they are short and make the wait page feel like it
+  ## starts or stops at odd positions.
+  VideoProgressStart = 0
+  VideoProgressEnd = 100
+
 type
   OverlayStats* = object
     imageWidth*: int
@@ -67,9 +74,38 @@ type
     videoFrames*: int
     videoPackets*: int
     videoPacketBytes*: int64
+    inputDurationSeconds*: float64
+    sourceFps*: float64
+    estimatedTotalFrames*: int
+    inputDurationSource*: string
+    sourceFpsSource*: string
+    progressSeconds*: float64
+    outputBitrate*: int
+    outputFps*: float64
+    outputFpsNum*: int
+    outputFpsDen*: int
+    outputFpsSource*: string
     totalMs*: int
 
   OverlayProgressCallback* = proc(ctx: pointer; progress: int; message: string) {.gcsafe.}
+
+  VideoProgressInfo = object
+    durationSeconds: float64
+    hasDuration: bool
+    sourceFps: float64
+    sourceFpsNum: int
+    sourceFpsDen: int
+    hasSourceFps: bool
+    estimatedTotalFrames: int
+    hasEstimatedTotalFrames: bool
+
+  VideoOutputFpsInfo = object
+    num: int
+    den: int
+    fps: float64
+    fpsForBitrate: int
+    gopSize: int
+    source: string
 
   OverlayDrawOptions* = object
     maxBoxes: int
@@ -191,17 +227,310 @@ proc formatBytes(value: int64): string =
     result = &"{value}B"
 
 
+proc formatBitrate(value: int): string =
+  if value >= 1_000_000:
+    result = &"{float(value) / 1_000_000.0:.1f}Mbps"
+  elif value >= 1_000:
+    result = &"{float(value) / 1_000.0:.0f}kbps"
+  else:
+    result = &"{value}bps"
+
+
 proc formatDurationMs(ms: int): string =
   if ms >= 1000:
     result = &"{float(ms) / 1000.0:.2f}s"
   else:
     result = &"{ms}ms"
 
+proc formatSeconds(value: float64): string =
+  if value >= 3600.0:
+    let
+      hours = int(value) div 3600
+      minutes = (int(value) mod 3600) div 60
+      seconds = int(value) mod 60
+    result = &"{hours}:{minutes:02d}:{seconds:02d}"
+  elif value >= 60.0:
+    let
+      minutes = int(value) div 60
+      seconds = value - float64(minutes * 60)
+    result = &"{minutes}:{seconds:04.1f}"
+  else:
+    result = &"{value:.1f}s"
+
+proc formatSourceFps(value: float64): string =
+  if value <= 0.0:
+    return "n/a"
+
+  var formatted = &"{value:.2f}"
+  while formatted.len > 0 and formatted[^1] == '0':
+    formatted.setLen(formatted.len - 1)
+  if formatted.len > 0 and formatted[^1] == '.':
+    formatted.setLen(formatted.len - 1)
+
+  result = &"{formatted}fps"
+
+proc formatOutputFps(value: float64): string =
+  result = formatSourceFps(value)
+
+proc gcdInt(a, b: int): int =
+  var
+    x = abs(a)
+    y = abs(b)
+  while y != 0:
+    let next = x mod y
+    x = y
+    y = next
+  if x <= 0:
+    result = 1
+  else:
+    result = x
+
+proc makeVideoOutputFpsInfo(num, den: int; source: string): VideoOutputFpsInfo =
+  var
+    n = num
+    d = den
+
+  if n <= 0 or d <= 0:
+    n = 30
+    d = 1
+
+  let g = gcdInt(n, d)
+  n = n div g
+  d = d div g
+
+  var fps = float64(n) / float64(d)
+  if fps < 1.0:
+    n = 30
+    d = 1
+    fps = 30.0
+  elif fps > 120.0:
+    n = 120
+    d = 1
+    fps = 120.0
+
+  result.num = n
+  result.den = d
+  result.fps = fps
+  result.fpsForBitrate = max(1, int(fps + 0.5))
+  result.gopSize = result.fpsForBitrate
+  result.source = source
+
+proc fpsRationalFromFloat(value: float64; num, den: var int): bool =
+  if value <= 0.0:
+    return false
+
+  ## Preserve the common NTSC rates when metadata has already been converted to
+  ## a float.  Exact avg_frame_rate/r_frame_rate values are preferred when they
+  ## are available from Mp4InputInfo.
+  if abs(value - 23.976) < 0.02:
+    num = 24000
+    den = 1001
+    return true
+  if abs(value - 29.97) < 0.02:
+    num = 30000
+    den = 1001
+    return true
+  if abs(value - 59.94) < 0.03:
+    num = 60000
+    den = 1001
+    return true
+
+  if abs(value - round(value)) < 0.001:
+    num = int(round(value))
+    den = 1
+    return num > 0
+
+  den = 1000
+  num = int(value * float64(den) + 0.5)
+  let g = gcdInt(num, den)
+  num = num div g
+  den = den div g
+  result = num > 0 and den > 0
+
+proc parseFpsValue(rawValue: string; num, den: var int): bool =
+  let raw = rawValue.strip().toLowerAscii()
+  if raw.len == 0:
+    return false
+
+  if raw.contains("/"):
+    let parts = raw.split("/", maxsplit = 1)
+    if parts.len != 2:
+      return false
+    try:
+      num = parseInt(parts[0].strip())
+      den = parseInt(parts[1].strip())
+      return num > 0 and den > 0
+    except ValueError:
+      return false
+
+  try:
+    let value = parseFloat(raw)
+    result = fpsRationalFromFloat(value, num, den)
+  except ValueError:
+    result = false
+
+proc resolveMp4VideoOutputFps(info: Mp4InputInfo): VideoOutputFpsInfo =
+  ## HAILO_DEMO_MP4_FPS can be:
+  ##   auto        : use input stream fps when available, otherwise 30fps
+  ##   25          : fixed integer fps
+  ##   30000/1001  : fixed rational fps
+  ##   29.97       : fixed decimal fps, converted to a rational
+  let raw = getEnv("HAILO_DEMO_MP4_FPS", "auto").strip().toLowerAscii()
+
+  if raw.len == 0 or raw in ["auto", "adaptive", "source", "input"]:
+    if info.hasSourceFps:
+      if info.sourceFpsNum > 0 and info.sourceFpsDen > 0:
+        return makeVideoOutputFpsInfo(info.sourceFpsNum, info.sourceFpsDen, info.fpsSource)
+
+      var n, d: int
+      if fpsRationalFromFloat(info.sourceFps, n, d):
+        return makeVideoOutputFpsInfo(n, d, info.fpsSource)
+
+    return makeVideoOutputFpsInfo(30, 1, "default")
+
+  var n, d: int
+  if parseFpsValue(raw, n, d):
+    return makeVideoOutputFpsInfo(n, d, "env")
+
+  result = makeVideoOutputFpsInfo(30, 1, "default")
+
+proc applyOutputFpsInfo(stats: var OverlayStats; info: VideoOutputFpsInfo) =
+  stats.outputFps = info.fps
+  stats.outputFpsNum = info.num
+  stats.outputFpsDen = info.den
+  stats.outputFpsSource = info.source
+
 proc formatThroughputFps(frames, ms: int): string =
   if frames > 0 and ms > 0:
     result = &"{float(frames) * 1000.0 / float(ms):.1f}fps"
   else:
     result = "n/a"
+
+proc formatInputVideoSummary(s: OverlayStats): string =
+  var parts: seq[string] = @[]
+  if s.sourceFps > 0.0:
+    parts.add(formatSourceFps(s.sourceFps))
+  if s.inputDurationSeconds > 0.0:
+    parts.add(formatSeconds(s.inputDurationSeconds))
+  if s.estimatedTotalFrames > 0:
+    parts.add(&"~{s.estimatedTotalFrames} frames")
+
+  if parts.len > 0:
+    result = parts.join("/")
+
+proc formatOutputVideoFpsSummary(s: OverlayStats): string =
+  if s.outputFps <= 0.0:
+    return ""
+
+  result = formatOutputFps(s.outputFps)
+  if s.outputFpsSource.len > 0:
+    result.add(&"/{s.outputFpsSource}")
+
+proc applyMp4InputInfo(stats: var OverlayStats; info: Mp4InputInfo) =
+  if info.hasDuration:
+    stats.inputDurationSeconds = info.durationSeconds
+    stats.inputDurationSource = info.durationSource
+  if info.hasSourceFps:
+    stats.sourceFps = info.sourceFps
+    stats.sourceFpsSource = info.fpsSource
+  if info.hasEstimatedTotalFrames:
+    stats.estimatedTotalFrames = info.estimatedTotalFrames
+
+proc toVideoProgressInfo(info: Mp4InputInfo): VideoProgressInfo =
+  ## Keep only scalar metadata for progress calculation.  This object is safe to
+  ## pass to the overlay/encode worker thread; the full Mp4InputInfo contains
+  ## GC-managed strings and is kept on the producer side only.
+  result.durationSeconds = info.durationSeconds
+  result.hasDuration = info.hasDuration
+  result.sourceFps = info.sourceFps
+  result.sourceFpsNum = info.sourceFpsNum
+  result.sourceFpsDen = info.sourceFpsDen
+  result.hasSourceFps = info.hasSourceFps
+  result.estimatedTotalFrames = info.estimatedTotalFrames
+  result.hasEstimatedTotalFrames = info.hasEstimatedTotalFrames
+
+proc progressFrameDurationSeconds(info: VideoProgressInfo): float64 =
+  if info.hasSourceFps and info.sourceFps > 0.0:
+    result = 1.0 / info.sourceFps
+
+proc progressTimestampSeconds(
+    frameIndex: int;
+    timestampSeconds: float64;
+    hasTimestampSeconds: bool;
+    info: VideoProgressInfo;
+    seconds: var float64
+  ): bool =
+  ## Return the approximate *processed end time* of the frame.
+  ##
+  ## Frame PTS usually represents the start time of the decoded frame.  For a
+  ## progress bar, however, users expect the bar to represent already-processed
+  ## work.  Therefore add one nominal frame duration when fps is known.
+  ##
+  ## Hardware decode paths may still produce missing/flat timestamps, so fall
+  ## back to (frameIndex + 1) / sourceFps.
+  let frameDuration = progressFrameDurationSeconds(info)
+
+  if hasTimestampSeconds and (timestampSeconds > 0.0 or frameIndex == 0):
+    seconds = timestampSeconds
+    if frameDuration > 0.0:
+      seconds += frameDuration
+    if info.hasDuration and info.durationSeconds > 0.0:
+      seconds = min(seconds, info.durationSeconds)
+    seconds = max(0.0, seconds)
+    return true
+
+  if info.hasSourceFps and info.sourceFps > 0.0 and frameIndex >= 0:
+    seconds = float64(frameIndex + 1) / info.sourceFps
+    if info.hasDuration and info.durationSeconds > 0.0:
+      seconds = min(seconds, info.durationSeconds)
+    seconds = max(0.0, seconds)
+    return true
+
+  result = false
+
+proc videoProgressPercent(
+    processedFrames: int;
+    maxFrames: int;
+    info: VideoProgressInfo;
+    timestampSeconds: float64;
+    hasProgressSeconds: bool
+  ): int =
+  if processedFrames <= 0:
+    return VideoProgressStart
+
+  var ratio = -1.0
+
+  if maxFrames > 0:
+    ratio = float64(processedFrames) / float64(maxFrames)
+  elif info.hasDuration and info.durationSeconds > 0.0 and hasProgressSeconds:
+    ratio = timestampSeconds / info.durationSeconds
+  elif info.hasEstimatedTotalFrames and info.estimatedTotalFrames > 0:
+    ratio = float64(processedFrames) / float64(info.estimatedTotalFrames)
+
+  if ratio >= 0.0:
+    ratio = max(0.0, min(1.0, ratio))
+    let span = VideoProgressEnd - VideoProgressStart
+    return min(VideoProgressEnd, VideoProgressStart + int(ratio * float64(span) + 0.5))
+
+  ## Last-resort fallback for containers without usable duration/fps metadata.
+  ## Do not claim completion without a real total.
+  result = min(VideoProgressEnd - 1, processedFrames div 10)
+
+proc formatVideoProgressMessage(
+    processedFrames: int;
+    info: VideoProgressInfo;
+    timestampSeconds: float64;
+    hasProgressSeconds: bool
+  ): string =
+  let timeDetail =
+    if info.hasDuration and info.durationSeconds > 0.0 and hasProgressSeconds:
+      &" ({formatSeconds(min(timestampSeconds, info.durationSeconds))}/{formatSeconds(info.durationSeconds)})"
+    elif info.hasEstimatedTotalFrames and info.estimatedTotalFrames > 0:
+      &" / ~{info.estimatedTotalFrames}"
+    else:
+      ""
+
+  result = &"processing video frame {processedFrames}{timeDetail}"
 
 proc formatOverlaySummary*(s: OverlayStats): string =
   ## Short human-facing result text for the web UI.  The verbose timing detail
@@ -216,7 +545,24 @@ proc formatOverlaySummary*(s: OverlayStats): string =
           &", output={formatBytes(s.videoPacketBytes)}"
         else:
           ""
-    result = &"MP4 complete: {s.videoFrames} frames in {duration} ({fps}); detections={s.detections}, boxes={s.boxesDrawn}, labels={s.labelsDrawn}{outputDetail}"
+      bitrateDetail =
+        if s.outputBitrate > 0:
+          &", bitrate={formatBitrate(s.outputBitrate)}"
+        else:
+          ""
+      outputFpsSummary = s.formatOutputVideoFpsSummary()
+      outputFpsDetail =
+        if outputFpsSummary.len > 0:
+          &", out_fps={outputFpsSummary}"
+        else:
+          ""
+      sourceSummary = s.formatInputVideoSummary()
+      sourceDetail =
+        if sourceSummary.len > 0:
+          &", source={sourceSummary}"
+        else:
+          ""
+    result = &"MP4 complete: {s.videoFrames} frames in {duration} ({fps}); detections={s.detections}, boxes={s.boxesDrawn}, labels={s.labelsDrawn}{outputDetail}{bitrateDetail}{outputFpsDetail}{sourceDetail}"
   else:
     let drawCountDetail =
       if s.boxesDrawn > 0 or s.labelsDrawn > 0:
@@ -281,12 +627,18 @@ proc formatOverlayStats*(s: OverlayStats): string =
 
   if s.videoFrames > 0:
     let decoderLabel = if s.decoderName.len > 0: s.decoderName else: "auto"
+    let sourceSummary = s.formatInputVideoSummary()
+    let sourceDetail =
+      if sourceSummary.len > 0:
+        &"/source:{sourceSummary}"
+      else:
+        ""
     result = base &
-      &"(video=frames:{s.videoFrames}/packets:{s.videoPackets}/bytes:{formatBytes(s.videoPacketBytes)}, " &
+      &"(video=frames:{s.videoFrames}/packets:{s.videoPackets}/bytes:{formatBytes(s.videoPacketBytes)}{sourceDetail}, " &
       &"decode={s.decodeMs}[decoder={decoderLabel}, open={s.decoderOpenMs}, reads={formatFrameMsSummary(s.readFramesMs)}], " &
       &"letterbox={s.letterboxMs}, {inferDetail}{pipelineDetail}, " &
       &"draw={s.drawMs}[rgbx={s.rgbxMs}, overlay={max(0, s.drawMs - s.rgbxMs)}], " &
-      &"encode={s.encodeMs}[open={s.encoderOpenMs}, writer={s.writerOpenMs}, flush={s.encoderFlushMs}, finish={s.writerFinishMs}])"
+      &"encode={s.encodeMs}[bitrate={formatBitrate(s.outputBitrate)}, fps={formatOutputVideoFpsSummary(s)}, open={s.encoderOpenMs}, writer={s.writerOpenMs}, flush={s.encoderFlushMs}, finish={s.writerFinishMs}])"
     return
 
   if s.decoderOpenMs > 0 or s.readFrameMs > 0 or s.rgbxMs > 0:
@@ -728,6 +1080,46 @@ proc parseEnvInt(name: string; defaultValue: int): int =
   except ValueError:
     result = defaultValue
 
+proc resolveMp4VideoBitrateConfig(): int =
+  ## Return 0 for automatic bitrate selection.  A numeric value keeps the old
+  ## fixed-bitrate behavior.
+  let raw = getEnv("HAILO_DEMO_MP4_BITRATE", "auto").strip().toLowerAscii()
+  if raw.len == 0 or raw in ["auto", "adaptive"]:
+    return 0
+
+  try:
+    result = max(1, parseInt(raw))
+  except ValueError:
+    result = 0
+
+proc autoMp4VideoBitrate(width, height, fps: int): int =
+  ## Pick a conservative H.264 bitrate from output frame size.
+  ##
+  ## The coefficient is chosen so that common resolutions land around:
+  ##   720p30  -> ~2Mbps
+  ##   1080p30 -> ~4Mbps
+  ##   4K30    -> ~15Mbps
+  ## This keeps demo output small while avoiding the worst artifacts from using
+  ## a fixed 2Mbps bitrate for Full-HD or 4K sources.
+  let
+    safeWidth = max(1, width)
+    safeHeight = max(1, height)
+    safeFps = max(1, fps)
+    pixels = float(safeWidth) * float(safeHeight)
+    bitsPerPixelFrame = 0.064
+    raw = int(pixels * float(safeFps) * bitsPerPixelFrame + 0.5)
+
+  result = raw
+  if result < 1_000_000:
+    result = 1_000_000
+  if result > 20_000_000:
+    result = 20_000_000
+
+proc resolveMp4VideoBitrate(width, height, fps, configValue: int): int =
+  if configValue > 0:
+    return configValue
+  result = autoMp4VideoBitrate(width, height, fps)
+
 proc resolveMp4VideoEncoderName(): string =
   result = getEnv("HAILO_DEMO_MP4_ENCODER", "h264_v4l2m2m").strip()
   if result.len == 0:
@@ -756,6 +1148,8 @@ type
     frameIndex: int
     pending: YoloAsyncPending
     rgbx: OwnedRGBXFrame
+    progressSeconds: float64
+    hasProgressSeconds: bool
 
 proc acquireRgbxFrame(
     pool: var seq[OwnedRGBXFrame];
@@ -773,24 +1167,33 @@ proc notifyVideoFrameProgress(
     onProgress: OverlayProgressCallback;
     progressCtx: pointer;
     stats: OverlayStats;
-    maxFrames: int
+    maxFrames: int;
+    inputInfo: VideoProgressInfo;
+    force = false
   ) {.gcsafe.} =
   if stats.videoFrames <= 0:
     return
-  if not (stats.videoFrames == 1 or (stats.videoFrames mod 10) == 0):
+  if not force and not (stats.videoFrames == 1 or (stats.videoFrames mod 10) == 0):
     return
 
-  let progress =
-    if maxFrames > 0:
-      min(95, 30 + (stats.videoFrames * 60 div maxFrames))
-    else:
-      min(95, 30 + (stats.videoFrames div 10))
+  let progress = videoProgressPercent(
+    stats.videoFrames,
+    maxFrames,
+    inputInfo,
+    stats.progressSeconds,
+    stats.progressSeconds > 0.0 or stats.videoFrames == 1
+  )
 
   notifyProgress(
     onProgress,
     progressCtx,
     progress,
-    &"processing video frame {stats.videoFrames}"
+    formatVideoProgressMessage(
+      stats.videoFrames,
+      inputInfo,
+      stats.progressSeconds,
+      stats.progressSeconds > 0.0 or stats.videoFrames == 1
+    )
   )
 
 proc drainEncoder(
@@ -878,6 +1281,8 @@ proc drainOldestPendingVideoFrame(
 
   inc stats.videoFrames
   stats.pipelineFrames = stats.videoFrames
+  if item.hasProgressSeconds:
+    stats.progressSeconds = item.progressSeconds
 
   ## Return the large RGBX buffer to a tiny local pool.  This keeps the Step 5
   ## look-ahead pipeline from allocating a multi-megabyte frame for every input
@@ -918,6 +1323,8 @@ type
     frameIndex: int
     pending: YoloAsyncPending
     rgbx: Pooled[OwnedRGBXFrame]
+    progressSeconds: float64
+    hasProgressSeconds: bool
     message: string
 
   VideoPipelineResultKind = enum
@@ -929,16 +1336,33 @@ type
     stats: OverlayStats
     message: string
 
+  VideoPipelineProgress = object
+    ## Scalar-only progress notification sent from the overlay/encode consumer
+    ## thread back to the job worker thread.
+    ##
+    ## Do not put GC-managed strings/seqs here.  The job worker thread converts
+    ## these scalar values into the WebUI message and updates JobStore itself.
+    processedFrames: int
+    timestampSeconds: float64
+    hasProgressSeconds: bool
+    force: bool
+
   VideoPipelineWorkerState = object
     frameQ: ThreadQueue[VideoPipelineItem]
     resultQ: ThreadQueue[VideoPipelineWorkerResult]
+    progressQ: ThreadQueue[VideoPipelineProgress]
     outputPath: SharedCString
     previewOutputPath: SharedCString
     fontPath: SharedCString
-    fps: int
+    fpsNum: int
+    fpsDen: int
+    fpsForBitrate: int
+    gopSize: int
     bitrate: int
     previewFrameNumber: int
     encoderName: SharedCString
+    maxFrames: int
+    progressInfo: VideoProgressInfo
 
 proc `=destroy`(self: var VideoPipelineItem) {.raises: [].} =
   ## VideoPipelineItem can carry an active Pooled[OwnedRGBXFrame].  Make the
@@ -999,6 +1423,16 @@ proc sendVideoPipelineResult(
   if sendRes.isErr:
     echo &"warning: failed to send video pipeline result: {sendRes.error}"
 
+proc sendVideoPipelineProgress(
+    q: ThreadQueue[VideoPipelineProgress];
+    update: sink VideoPipelineProgress
+  ) {.gcsafe.} =
+  var owned = move update
+  let sendRes = q.sendMove(move owned)
+  if sendRes.isErr:
+    ## Progress is advisory.  Dropping it is better than crashing the demo.
+    echo &"warning: failed to send video pipeline progress: {sendRes.error}"
+
 proc receiveVideoPipelineResult(q: ThreadQueue[VideoPipelineWorkerResult]): VideoPipelineWorkerResult =
   ## receiveResult() returns a MoveResult.  The installed move_results helper
   ## exposes isOk/take(), but not isErr, so keep this path compatible with that
@@ -1007,6 +1441,104 @@ proc receiveVideoPipelineResult(q: ThreadQueue[VideoPipelineWorkerResult]): Vide
   if not recvRes.isOk:
     raise newException(IOError, &"receive video pipeline result failed: {recvRes.error}")
   result = recvRes.take()
+
+proc sendEncodedVideoFrameProgress(
+    progressQ: ThreadQueue[VideoPipelineProgress];
+    processedFrames: int;
+    timestampSeconds: float64;
+    hasProgressSeconds: bool;
+    force = false
+  ) {.gcsafe.} =
+  ## The consumer thread must not call JobStore.updateJob() directly.  JobStore
+  ## contains GC-managed strings and a Table owned by the job worker thread;
+  ## updating it from this overlay/encode thread can leave strings allocated on
+  ## the wrong thread-local heap and crash later during setDone().
+  ##
+  ## Send only scalar progress information back to the job worker thread.
+  ## The job worker thread formats the message and updates the WebUI state.
+  if processedFrames <= 0:
+    return
+  if not force and not (processedFrames == 1 or (processedFrames mod 10) == 0):
+    return
+
+  var update = VideoPipelineProgress(
+    processedFrames: processedFrames,
+    timestampSeconds: timestampSeconds,
+    hasProgressSeconds: hasProgressSeconds,
+    force: force
+  )
+  progressQ.sendVideoPipelineProgress(move update)
+
+proc applyVideoPipelineProgress(
+    onProgress: OverlayProgressCallback;
+    progressCtx: pointer;
+    update: VideoPipelineProgress;
+    maxFrames: int;
+    inputInfo: VideoProgressInfo
+  ) =
+  let progress = videoProgressPercent(
+    update.processedFrames,
+    maxFrames,
+    inputInfo,
+    update.timestampSeconds,
+    update.hasProgressSeconds
+  )
+
+  notifyProgress(
+    onProgress,
+    progressCtx,
+    progress,
+    formatVideoProgressMessage(
+      update.processedFrames,
+      inputInfo,
+      update.timestampSeconds,
+      update.hasProgressSeconds
+    )
+  )
+
+proc drainVideoPipelineProgress(
+    progressQ: ThreadQueue[VideoPipelineProgress];
+    onProgress: OverlayProgressCallback;
+    progressCtx: pointer;
+    maxFrames: int;
+    inputInfo: VideoProgressInfo
+  ) =
+  while true:
+    var update: VideoPipelineProgress
+    let recvRes = progressQ.tryReceive(update)
+    if recvRes.isErr:
+      raise newException(IOError, &"receive video pipeline progress failed: {recvRes.error}")
+    if not recvRes.get():
+      break
+
+    applyVideoPipelineProgress(onProgress, progressCtx, update, maxFrames, inputInfo)
+
+proc waitVideoPipelineResultWithProgress(
+    resultQ: ThreadQueue[VideoPipelineWorkerResult];
+    progressQ: ThreadQueue[VideoPipelineProgress];
+    onProgress: OverlayProgressCallback;
+    progressCtx: pointer;
+    maxFrames: int;
+    inputInfo: VideoProgressInfo
+  ): VideoPipelineWorkerResult =
+  ## Wait for the consumer result while continuing to publish progress updates
+  ## from the job worker thread.  This keeps JobStore ownership on one thread
+  ## while the progress bar still reflects overlay/encode completion.
+  while true:
+    drainVideoPipelineProgress(progressQ, onProgress, progressCtx, maxFrames, inputInfo)
+
+    var workerResult: VideoPipelineWorkerResult
+    let recvRes = resultQ.tryReceive(workerResult)
+    if recvRes.isErr:
+      raise newException(IOError, &"receive video pipeline result failed: {recvRes.error}")
+    if recvRes.get():
+      ## Drain any final progress update that may have been queued immediately
+      ## before the result.
+      drainVideoPipelineProgress(progressQ, onProgress, progressCtx, maxFrames, inputInfo)
+      return workerResult
+
+    sleep(10)
+
 
 proc processThreadedVideoPipelineFrame(
     item: var VideoPipelineItem;
@@ -1018,6 +1550,9 @@ proc processThreadedVideoPipelineFrame(
     previewOutputPath: string;
     previewFrameNumber: int;
     previewSaved: var bool;
+    maxFrames: int;
+    progressInfo: VideoProgressInfo;
+    progressQ: ThreadQueue[VideoPipelineProgress];
     stats: var OverlayStats
   ) =
   var yoloResult: YoloAsyncResult
@@ -1067,6 +1602,16 @@ proc processThreadedVideoPipelineFrame(
 
   inc stats.videoFrames
   stats.pipelineFrames = stats.videoFrames
+  if item.hasProgressSeconds:
+    stats.progressSeconds = item.progressSeconds
+
+  sendEncodedVideoFrameProgress(
+    progressQ,
+    stats.videoFrames,
+    item.progressSeconds,
+    item.hasProgressSeconds,
+    false
+  )
 
 proc videoPipelineConsumerMain(state: VideoPipelineWorkerState) {.thread.} =
   var workerResult = VideoPipelineWorkerResult(kind: vprDone)
@@ -1101,16 +1646,19 @@ proc videoPipelineConsumerMain(state: VideoPipelineWorkerState) {.thread.} =
               frameH = item.rgbx.value.height
               encoderHeight = alignUp(frameH, 16)
 
+            let actualBitrate = resolveMp4VideoBitrate(frameW, frameH, state.fpsForBitrate, state.bitrate)
+            workerResult.stats.outputBitrate = actualBitrate
+
             var stageStart = epochTime()
             encoder = checkFFmpeg(openVideoEncoder(VideoEncoderOptions(
               encoderName: encoderName,
               width: frameW,
               height: encoderHeight,
               pixelFormat: pfNv12,
-              timeBase: Rational(num: 1, den: int32(state.fps)),
-              framerate: Rational(num: int32(state.fps), den: 1),
-              bitRate: int64(state.bitrate),
-              gopSize: state.fps,
+              timeBase: Rational(num: int32(state.fpsDen), den: int32(state.fpsNum)),
+              framerate: Rational(num: int32(state.fpsNum), den: int32(state.fpsDen)),
+              bitRate: int64(actualBitrate),
+              gopSize: state.gopSize,
               maxBFrames: 0,
               globalHeader: true
             )), &"open video encoder {encoderName}")
@@ -1131,11 +1679,22 @@ proc videoPipelineConsumerMain(state: VideoPipelineWorkerState) {.thread.} =
             previewOutputPath,
             state.previewFrameNumber,
             previewSaved,
+            state.maxFrames,
+            state.progressInfo,
+            state.progressQ,
             workerResult.stats
           )
 
       if workerResult.stats.videoFrames <= 0:
         raise newException(IOError, "MP4 has no decodable video frame")
+
+      sendEncodedVideoFrameProgress(
+        state.progressQ,
+        workerResult.stats.videoFrames,
+        workerResult.stats.progressSeconds,
+        workerResult.stats.progressSeconds > 0.0 or workerResult.stats.videoFrames == 1,
+        true
+      )
 
       var stageStart = epochTime()
       checkFFmpegVoid(encoder.flush(), "flush encoder")
@@ -1173,24 +1732,29 @@ proc notifyPreparedVideoFrameProgress(
     onProgress: OverlayProgressCallback;
     progressCtx: pointer;
     submitted: int;
-    maxFrames: int
+    maxFrames: int;
+    inputInfo: VideoProgressInfo;
+    timestampSeconds: float64;
+    hasProgressSeconds: bool
   ) {.gcsafe.} =
   if submitted <= 0:
     return
   if not (submitted == 1 or (submitted mod 10) == 0):
     return
 
-  let progress =
-    if maxFrames > 0:
-      min(95, 30 + (submitted * 60 div maxFrames))
-    else:
-      min(95, 30 + (submitted div 10))
+  let progress = videoProgressPercent(
+    submitted,
+    maxFrames,
+    inputInfo,
+    timestampSeconds,
+    hasProgressSeconds
+  )
 
   notifyProgress(
     onProgress,
     progressCtx,
     progress,
-    &"processing video frame {submitted}"
+    formatVideoProgressMessage(submitted, inputInfo, timestampSeconds, hasProgressSeconds)
   )
 
 proc mergeThreadedVideoStats(result: var OverlayStats; workerStats: OverlayStats) =
@@ -1210,6 +1774,7 @@ proc mergeThreadedVideoStats(result: var OverlayStats; workerStats: OverlayStats
   result.videoFrames = workerStats.videoFrames
   result.videoPackets = workerStats.videoPackets
   result.videoPacketBytes = workerStats.videoPacketBytes
+  result.outputBitrate = workerStats.outputBitrate
 
   result.encoderOpenMs = workerStats.encoderOpenMs
   result.writerOpenMs = workerStats.writerOpenMs
@@ -1237,8 +1802,7 @@ proc drawMp4VideoOverlayThreaded(
   ## and encodes.  This hides overlay/encode work behind the next frame's decode
   ## and preprocessing, while keeping the HAILO worker itself unchanged.
   let totalStart = epochTime()
-  let fps = max(1, parseEnvInt("HAILO_DEMO_MP4_FPS", 30))
-  let bitrate = max(1, parseEnvInt("HAILO_DEMO_MP4_BITRATE", 2_000_000))
+  let bitrateConfig = resolveMp4VideoBitrateConfig()
   let maxFrames = parseEnvInt("HAILO_DEMO_MP4_VIDEO_MAX_FRAMES", 90)
   let encoderName = resolveMp4VideoEncoderName()
   let maxInFlight = resolveMp4VideoInFlight()
@@ -1258,29 +1822,20 @@ proc drawMp4VideoOverlayThreaded(
     raise newException(IOError, &"new video pipeline result queue failed: {resultQRes.error}")
   let resultQ = resultQRes.get()
 
+  let progressQRes = newThreadQueue[VideoPipelineProgress](32)
+  if progressQRes.isErr:
+    raise newException(IOError, &"new video pipeline progress queue failed: {progressQRes.error}")
+  let progressQ = progressQRes.get()
+
   var
     sharedOutputPath = initSharedCString(outputPath)
     sharedPreviewOutputPath = initSharedCString(previewOutputPath)
     sharedFontPath = initSharedCString(fontPath)
     sharedEncoderName = initSharedCString(encoderName)
 
-  var workerState = VideoPipelineWorkerState(
-    frameQ: frameQ,
-    resultQ: resultQ,
-    outputPath: sharedOutputPath,
-    previewOutputPath: sharedPreviewOutputPath,
-    fontPath: sharedFontPath,
-    fps: fps,
-    bitrate: bitrate,
-    previewFrameNumber: previewFrameNumber,
-    encoderName: sharedEncoderName
-  )
   var consumerThread: Thread[VideoPipelineWorkerState]
-  createThread(consumerThread, videoPipelineConsumerMain, workerState)
-  var consumerStarted = true
+  var consumerStarted = false
   var terminalSent = false
-
-  notifyProgress(onProgress, progressCtx, 20, "opening MP4 decoder")
 
   try:
     var reader = openMp4PreviewDecoder(inputPath)
@@ -1288,7 +1843,30 @@ proc drawMp4VideoOverlayThreaded(
 
     result.decoderOpenMs = reader.decoderOpenMs
     result.decoderName = reader.decoderName
-    notifyProgress(onProgress, progressCtx, 25, "decoding video frames")
+    result.applyMp4InputInfo(reader.inputInfo)
+    let progressInfo = reader.inputInfo.toVideoProgressInfo()
+    let outputFps = resolveMp4VideoOutputFps(reader.inputInfo)
+    result.applyOutputFpsInfo(outputFps)
+
+    var workerState = VideoPipelineWorkerState(
+      frameQ: frameQ,
+      resultQ: resultQ,
+      progressQ: progressQ,
+      outputPath: sharedOutputPath,
+      previewOutputPath: sharedPreviewOutputPath,
+      fontPath: sharedFontPath,
+      fpsNum: outputFps.num,
+      fpsDen: outputFps.den,
+      fpsForBitrate: outputFps.fpsForBitrate,
+      gopSize: outputFps.gopSize,
+      bitrate: bitrateConfig,
+      previewFrameNumber: previewFrameNumber,
+      encoderName: sharedEncoderName,
+      maxFrames: maxFrames,
+      progressInfo: progressInfo
+    )
+    createThread(consumerThread, videoPipelineConsumerMain, workerState)
+    consumerStarted = true
 
     var
       poolReady = false
@@ -1306,6 +1884,16 @@ proc drawMp4VideoOverlayThreaded(
       result.imageWidth = frameRead.frameWidth
       result.imageHeight = frameRead.frameHeight
       result.previewFrameIndex = frameRead.frameIndex
+      var progressSeconds = 0.0
+      let hasProgressSeconds = progressTimestampSeconds(
+        frameRead.frameIndex,
+        frameRead.timestampSeconds,
+        frameRead.hasTimestampSeconds,
+        progressInfo,
+        progressSeconds
+      )
+      if hasProgressSeconds:
+        result.progressSeconds = progressSeconds
 
       if not poolReady:
         let poolRes = newPool[OwnedRGBXFrame](framePoolCapacity)
@@ -1317,7 +1905,6 @@ proc drawMp4VideoOverlayThreaded(
         for _ in 0 ..< framePoolCapacity:
           framePool.addRgbxFrameToPool(pooledWidth, pooledHeight)
         poolReady = true
-        notifyProgress(onProgress, progressCtx, 30, &"processing video frames ({pooledWidth}x{pooledHeight})")
       elif frameRead.frameWidth != pooledWidth or frameRead.frameHeight != pooledHeight:
         raise newException(
           IOError,
@@ -1346,25 +1933,31 @@ proc drawMp4VideoOverlayThreaded(
         kind: vpiFrame,
         frameIndex: frameRead.frameIndex,
         pending: pending,
-        rgbx: move rgbxItem
+        rgbx: move rgbxItem,
+        progressSeconds: progressSeconds,
+        hasProgressSeconds: hasProgressSeconds
       )
       frameQ.sendVideoPipelineItem(move item, "send video pipeline frame")
       result.pipelineFrames = result.pipelineSubmitted
 
-      notifyPreparedVideoFrameProgress(
-        onProgress,
-        progressCtx,
-        result.pipelineSubmitted,
-        maxFrames
-      )
+      ## Progress is produced by the consumer thread after overlay/encode.
+      ## Drain it from this job worker thread so JobStore is never updated from
+      ## the consumer thread, and so the progress queue cannot fill on long
+      ## videos.
+      drainVideoPipelineProgress(progressQ, onProgress, progressCtx, maxFrames, progressInfo)
 
     var doneItem = VideoPipelineItem(kind: vpiDone)
     frameQ.sendVideoPipelineItem(move doneItem, "send video pipeline done")
     terminalSent = true
 
-    notifyProgress(onProgress, progressCtx, 96, &"finalizing video ({result.pipelineSubmitted} submitted frames)")
-
-    let workerResult = resultQ.receiveVideoPipelineResult()
+    let workerResult = waitVideoPipelineResultWithProgress(
+      resultQ,
+      progressQ,
+      onProgress,
+      progressCtx,
+      maxFrames,
+      progressInfo
+    )
     joinThread(consumerThread)
     consumerStarted = false
 
@@ -1414,8 +2007,7 @@ proc drawMp4VideoOverlayLookahead(
   ## overlay/encode into independent threadtools queues without changing the
   ## web-facing job contract.
   let totalStart = epochTime()
-  let fps = max(1, parseEnvInt("HAILO_DEMO_MP4_FPS", 30))
-  let bitrate = max(1, parseEnvInt("HAILO_DEMO_MP4_BITRATE", 2_000_000))
+  let bitrateConfig = resolveMp4VideoBitrateConfig()
   let maxFrames = parseEnvInt("HAILO_DEMO_MP4_VIDEO_MAX_FRAMES", 90)
   let encoderName = resolveMp4VideoEncoderName()
   let maxInFlight = resolveMp4VideoInFlight()
@@ -1424,14 +2016,15 @@ proc drawMp4VideoOverlayLookahead(
   let drawOptions = resolveVideoDrawOptions()
   result.pipelineInFlight = maxInFlight
 
-  notifyProgress(onProgress, progressCtx, 20, "opening MP4 decoder")
-
   var reader = openMp4PreviewDecoder(inputPath)
   defer: reader.close()
 
   result.decoderOpenMs = reader.decoderOpenMs
   result.decoderName = reader.decoderName
-  notifyProgress(onProgress, progressCtx, 25, "decoding video frames")
+  result.applyMp4InputInfo(reader.inputInfo)
+  let progressInfo = reader.inputInfo.toVideoProgressInfo()
+  let outputFps = resolveMp4VideoOutputFps(reader.inputInfo)
+  result.applyOutputFpsInfo(outputFps)
 
   var
     encoder: VideoEncoder
@@ -1457,9 +2050,22 @@ proc drawMp4VideoOverlayLookahead(
     result.imageWidth = frameRead.frameWidth
     result.imageHeight = frameRead.frameHeight
     result.previewFrameIndex = frameRead.frameIndex
+    var progressSeconds = 0.0
+    let hasProgressSeconds = progressTimestampSeconds(
+      frameRead.frameIndex,
+      frameRead.timestampSeconds,
+      frameRead.hasTimestampSeconds,
+      progressInfo,
+      progressSeconds
+    )
+    if hasProgressSeconds:
+      result.progressSeconds = progressSeconds
 
     if not encoderReady:
       let encoderHeight = alignUp(frameRead.frameHeight, 16)
+
+      let actualBitrate = resolveMp4VideoBitrate(frameRead.frameWidth, frameRead.frameHeight, outputFps.fpsForBitrate, bitrateConfig)
+      result.outputBitrate = actualBitrate
 
       var stageStart = epochTime()
       encoder = checkFFmpeg(openVideoEncoder(VideoEncoderOptions(
@@ -1467,10 +2073,10 @@ proc drawMp4VideoOverlayLookahead(
         width: frameRead.frameWidth,
         height: encoderHeight,
         pixelFormat: pfNv12,
-        timeBase: Rational(num: 1, den: int32(fps)),
-        framerate: Rational(num: int32(fps), den: 1),
-        bitRate: int64(bitrate),
-        gopSize: fps,
+        timeBase: Rational(num: int32(outputFps.den), den: int32(outputFps.num)),
+        framerate: Rational(num: int32(outputFps.num), den: int32(outputFps.den)),
+        bitRate: int64(actualBitrate),
+        gopSize: outputFps.gopSize,
         maxBFrames: 0,
         globalHeader: true
       )), &"open video encoder {encoderName}")
@@ -1480,7 +2086,6 @@ proc drawMp4VideoOverlayLookahead(
       writer = checkFFmpeg(openMp4VideoWriter(outputPath, encoder), "open MP4 writer")
       result.writerOpenMs = elapsedMs(stageStart)
       encoderReady = true
-      notifyProgress(onProgress, progressCtx, 30, &"processing video frames ({frameRead.frameWidth}x{frameRead.frameHeight})")
 
     var stageStart = epochTime()
     var yoloInput = frameRead.read.frame.prepareYoloInput()
@@ -1507,7 +2112,9 @@ proc drawMp4VideoOverlayLookahead(
     pendingFrames.add PendingVideoFrame(
       frameIndex: frameRead.frameIndex,
       pending: pending,
-      rgbx: move rgbx
+      rgbx: move rgbx,
+      progressSeconds: progressSeconds,
+      hasProgressSeconds: hasProgressSeconds
     )
     result.pipelineFrames = result.videoFrames + pendingFrames.len
 
@@ -1525,7 +2132,7 @@ proc drawMp4VideoOverlayLookahead(
         rgbxPool,
         result
       )
-      notifyVideoFrameProgress(onProgress, progressCtx, result, maxFrames)
+      notifyVideoFrameProgress(onProgress, progressCtx, result, maxFrames, progressInfo)
 
   while pendingFrames.len > 0:
     drainOldestPendingVideoFrame(
@@ -1541,12 +2148,12 @@ proc drawMp4VideoOverlayLookahead(
       rgbxPool,
       result
     )
-    notifyVideoFrameProgress(onProgress, progressCtx, result, maxFrames)
+    notifyVideoFrameProgress(onProgress, progressCtx, result, maxFrames, progressInfo)
 
   if result.videoFrames <= 0:
     raise newException(IOError, &"MP4 has no decodable video frame: {inputPath}")
 
-  notifyProgress(onProgress, progressCtx, 96, &"finalizing video ({result.videoFrames} frames)")
+  notifyVideoFrameProgress(onProgress, progressCtx, result, maxFrames, progressInfo, true)
 
   var stageStart = epochTime()
   checkFFmpegVoid(encoder.flush(), "flush encoder")

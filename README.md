@@ -170,7 +170,21 @@ nginx 前段構成では、アプリ本体は localhost のみに bind します
 export HAILO_DEMO_MP4_DECODER="h264_v4l2m2m"
 export HAILO_DEMO_MP4_ENCODER="h264_v4l2m2m"
 export HAILO_DEMO_MP4_FPS="30"
-export HAILO_DEMO_MP4_BITRATE="2000000"
+export HAILO_DEMO_MP4_BITRATE="auto"
+```
+
+`HAILO_DEMO_MP4_BITRATE=auto` では、出力 frame のピクセルサイズから H.264 bitrate を自動選択します。目安は以下です。
+
+```text
+720p30  : 約2Mbps
+1080p30 : 約4Mbps
+4K30    : 約15Mbps
+```
+
+固定値にしたい場合は bps 単位で指定します。
+
+```sh
+export HAILO_DEMO_MP4_BITRATE="4000000"
 ```
 
 ### 処理フレーム数
@@ -304,6 +318,7 @@ volatile
 - upload / jobs は volatile 領域でよい
 - 不要な FFmpeg CLI 機能や codec は削る
 - HEF が大きいため、他の rootfs 追加物はできるだけ小さくする
+- MP4 bitrate は `auto` を推奨。Full-HD / 4K を固定 2Mbps で出すと画質が大きく落ちる
 
 ## 画面表示
 
@@ -328,7 +343,7 @@ JPEG / MP4 を選択して upload します。
 summary 例:
 
 ```text
-MP4 complete: 350 frames in 9.00s (38.9fps); detections=6187, boxes=4141, labels=2058, output=2.78MiB
+MP4 complete: 350 frames in 9.00s (38.9fps); detections=6187, boxes=4141, labels=2058, output=2.78MiB, bitrate=2.0Mbps
 ```
 
 ## トラブルシュート
