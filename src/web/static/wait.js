@@ -2,6 +2,7 @@ const waitPage = document.getElementById('wait-page');
 const jobId = waitPage.dataset.jobId;
 const previewCard = document.getElementById('preview-card');
 const previewImage = document.getElementById('preview-image');
+const liveViewerRow = document.getElementById('live-viewer-row');
 let previewLoaded = false;
 
 function refreshPreview(job) {
@@ -16,6 +17,11 @@ function refreshPreview(job) {
   previewImage.src = '/preview/' + encodeURIComponent(jobId) + '?v=' + Date.now();
 }
 
+function refreshLiveViewerLink(job) {
+  if (!liveViewerRow) return;
+  liveViewerRow.hidden = job.kind !== 'mp4' || job.status === 'failed';
+}
+
 async function poll() {
   const res = await fetch('/api/jobs/' + encodeURIComponent(jobId));
   if (!res.ok) {
@@ -25,6 +31,7 @@ async function poll() {
   const job = await res.json();
   document.getElementById('progress').value = job.progress;
   document.getElementById('status').textContent = job.status + ' - ' + job.message;
+  refreshLiveViewerLink(job);
   if (job.status !== 'done' && job.status !== 'failed') {
     refreshPreview(job);
   }

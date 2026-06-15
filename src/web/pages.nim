@@ -63,24 +63,48 @@ proc isImageOutput(job: JobInfo): bool =
 
 proc renderResultPage*(job: JobInfo): string =
   let safeJobId = job.id.htmlEscape
+  let isMp4 = job.kind == jkMp4
+  let isDone = job.status == jsDone
+  let isFailed = job.status == jsFailed
 
   let previewBlock =
-    if job.status == jsDone and not job.isImageOutput:
+    if isDone and isMp4:
       &"<details><summary>Preview frame</summary><img class=\"result-media\" src=\"/preview/{safeJobId}?v={job.updatedAtUnix}\" alt=\"preview frame\"></details>"
     else:
       ""
 
   let mediaBlock =
-    if job.status == jsDone:
-      if job.isImageOutput:
-        &"<img class=\"result-media\" src=\"/files/{safeJobId}\" alt=\"result\">"
-      else:
-        &"""
+    if isDone and job.isImageOutput:
+      &"<img class=\"result-media\" src=\"/files/{safeJobId}\" alt=\"result\">"
+    elif isMp4 and not isFailed:
+      let generatedBlock =
+        if isDone:
+          &"""
+    <div id="generated-output-card" class="media-card" data-output-url="/job-media/{safeJobId}/output.mp4">
+      <h3>Generated overlay MP4</h3>
+      <p class="muted">bbox / label を焼き込んだ生成済みMP4です。ダウンロードにも使えます。</p>
+      <video class="result-media" controls preload="metadata" src="/job-media/{safeJobId}/output.mp4"></video>
+    </div>"""
+        else:
+          &"""
+    <div id="generated-output-card" class="media-card pending-output-card" data-output-url="/job-media/{safeJobId}/output.mp4">
+      <h3>Generated overlay MP4</h3>
+      <p id="generated-output-status" class="muted">bbox / label を焼き込んだMP4は処理完了後に表示されます。処理中は上の Interactive viewer で、取得済みのHAILO検出結果を元動画へ重ねて確認できます。</p>
+      <progress id="generated-output-progress" value="{job.progress}" max="100"></progress>
+    </div>"""
+
+      let viewerNote =
+        if isDone:
+          "元動画の上に保存済みのHAILO検出結果を重ねます。Overlayを切り替えると、元動画と検出結果をその場で比較できます。"
+        else:
+          "元動画はすぐ再生できます。HAILO検出結果が生成された範囲は、処理中でも順次overlayされます。"
+
+      &"""
   {previewBlock}
   <section class="media-grid" aria-label="MP4 result viewers">
-    <div id="interactive-viewer" class="media-card interactive-viewer" data-job-id="{safeJobId}" data-detections-url="/job-media/{safeJobId}/detections.json">
+    <div id="interactive-viewer" class="media-card interactive-viewer" data-job-id="{safeJobId}" data-job-status="{job.status.toWire.htmlEscape}" data-job-api-url="/api/jobs/{safeJobId}" data-detections-url="/job-media/{safeJobId}/detections.json" data-live-detections-url="/job-media/{safeJobId}/detections.ndjson">
       <h3>Interactive viewer</h3>
-      <p class="muted">元動画の上に保存済みのHAILO検出結果を重ねます。Overlayを切り替えると、元動画と検出結果をその場で比較できます。</p>
+      <p class="muted">{viewerNote.htmlEscape}</p>
       <div class="viewer-toolbar" aria-label="Interactive overlay controls">
         <button id="iv-overlay-toggle" class="secondary" type="button">Overlay: ON</button>
         <label class="compact-control">
@@ -110,17 +134,15 @@ proc renderResultPage*(job: JobInfo): string =
         <canvas id="iv-canvas" class="overlay-canvas" aria-hidden="true"></canvas>
       </div>
     </div>
-    <div class="media-card">
-      <h3>Generated overlay MP4</h3>
-      <p class="muted">bbox / label を焼き込んだ生成済みMP4です。ダウンロードにも使えます。</p>
-      <video class="result-media" controls preload="metadata" src="/job-media/{safeJobId}/output.mp4"></video>
-    </div>
+{generatedBlock}
   </section>"""
-    else:
+    elif isFailed:
       &"<p class=\"error\">{job.message.htmlEscape}</p>"
+    else:
+      &"<p class=\"muted\">job is still processing.</p>"
 
   let detailBlock =
-    if job.status == jsDone and job.detailMessage.len > 0:
+    if isDone and job.detailMessage.len > 0:
       &"""
   <details>
     <summary>Technical timing details</summary>
@@ -130,14 +152,16 @@ proc renderResultPage*(job: JobInfo): string =
       ""
 
   let downloadLink =
-    if job.status == jsDone:
+    if isDone:
       &"<a href=\"/files/{safeJobId}\">Download</a>"
     else:
       ""
 
   let detectionsLink =
-    if job.status == jsDone and job.kind == jkMp4:
+    if isDone and isMp4:
       &"<a href=\"/job-media/{safeJobId}/detections.json\">Detection JSON</a>"
+    elif isMp4 and not isFailed:
+      &"<a href=\"/job-media/{safeJobId}/detections.ndjson\">Live detections</a>"
     else:
       ""
 
@@ -152,7 +176,7 @@ proc renderResultPage*(job: JobInfo): string =
     .replaceToken("DETECTIONS_LINK", detectionsLink)
 
   let scriptPath =
-    if job.status == jsDone and job.kind == jkMp4:
+    if isMp4 and not isFailed:
       "/static/result-viewer.js"
     else:
       ""

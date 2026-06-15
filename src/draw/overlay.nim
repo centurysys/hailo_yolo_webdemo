@@ -117,6 +117,9 @@ type
     file: File
     opened: bool
     firstFrame: bool
+    livePath: string
+    liveFile: File
+    liveOpened: bool
     width: int
     height: int
     frameCount: int
@@ -765,6 +768,41 @@ proc writeJsonField(file: File; name: string; value: string; comma = true) =
     file.write(",")
   file.write("\n")
 
+proc videoInfoJson(width, height: int; inputInfo: VideoProgressInfo): string =
+  var parts: seq[string] = @[]
+  parts.add(&"\"width\":{width}")
+  parts.add(&"\"height\":{height}")
+  if inputInfo.hasSourceFps:
+    parts.add(&"\"sourceFps\":{inputInfo.sourceFps:.6f}")
+    parts.add(&"\"sourceFpsNum\":{inputInfo.sourceFpsNum}")
+    parts.add(&"\"sourceFpsDen\":{inputInfo.sourceFpsDen}")
+  else:
+    parts.add("\"sourceFps\":0.000000")
+    parts.add("\"sourceFpsNum\":0")
+    parts.add("\"sourceFpsDen\":0")
+  if inputInfo.hasDuration:
+    parts.add(&"\"durationSeconds\":{inputInfo.durationSeconds:.6f}")
+  else:
+    parts.add("\"durationSeconds\":0.000000")
+  if inputInfo.hasEstimatedTotalFrames:
+    parts.add(&"\"estimatedTotalFrames\":{inputInfo.estimatedTotalFrames}")
+  else:
+    parts.add("\"estimatedTotalFrames\":0")
+  result = "{" & parts.join(",") & "}"
+
+proc detectionToJson(raw: Detection; width, height: int): string =
+  let d = raw.clampDetection(width, height)
+  let
+    nx = d.x / max(1.float32, width.float32)
+    ny = d.y / max(1.float32, height.float32)
+    nw = d.w / max(1.float32, width.float32)
+    nh = d.h / max(1.float32, height.float32)
+
+  result =
+    &"{{\"classId\": {d.classId}, \"label\": {jsonEscapedString(d.label)}, " &
+    &"\"score\": {d.score:.6f}, \"x\": {nx:.6f}, \"y\": {ny:.6f}, " &
+    &"\"w\": {nw:.6f}, \"h\": {nh:.6f}}}"
+
 proc moveDetectionJsonIntoPlace(writer: var DetectionJsonWriter) =
   try:
     moveFile(writer.tmpPath, writer.outputPath)
@@ -778,47 +816,63 @@ proc moveDetectionJsonIntoPlace(writer: var DetectionJsonWriter) =
 
 proc openDetectionJsonWriter(
     outputPath: string;
+    liveOutputPath: string;
     width, height: int;
     inputInfo: VideoProgressInfo
   ): DetectionJsonWriter =
-  if outputPath.len == 0:
+  if outputPath.len == 0 and liveOutputPath.len == 0:
     return
 
-  let dir = outputPath.splitFile.dir
-  if dir.len > 0:
-    createDir(dir)
+  let primaryDir =
+    if outputPath.len > 0: outputPath.splitFile.dir
+    else: liveOutputPath.splitFile.dir
+  if primaryDir.len > 0:
+    createDir(primaryDir)
 
   result.outputPath = outputPath
-  result.tmpPath = outputPath & ".tmp"
+  if outputPath.len > 0:
+    result.tmpPath = outputPath & ".tmp"
+  result.livePath = liveOutputPath
   result.width = width
   result.height = height
   result.firstFrame = true
-  result.file = open(result.tmpPath, fmWrite)
-  result.opened = true
 
-  result.file.write("{\n")
-  result.file.write("  \"version\": 1,\n")
-  result.file.write("  \"video\": {\n")
-  result.file.writeJsonField("width", $width)
-  result.file.writeJsonField("height", $height)
-  if inputInfo.hasSourceFps:
-    result.file.writeJsonField("sourceFps", &"{inputInfo.sourceFps:.6f}")
-    result.file.writeJsonField("sourceFpsNum", $inputInfo.sourceFpsNum)
-    result.file.writeJsonField("sourceFpsDen", $inputInfo.sourceFpsDen)
-  else:
-    result.file.writeJsonField("sourceFps", "0.000000")
-    result.file.writeJsonField("sourceFpsNum", "0")
-    result.file.writeJsonField("sourceFpsDen", "0")
-  if inputInfo.hasDuration:
-    result.file.writeJsonField("durationSeconds", &"{inputInfo.durationSeconds:.6f}")
-  else:
-    result.file.writeJsonField("durationSeconds", "0.000000")
-  if inputInfo.hasEstimatedTotalFrames:
-    result.file.writeJsonField("estimatedTotalFrames", $inputInfo.estimatedTotalFrames, comma = false)
-  else:
-    result.file.writeJsonField("estimatedTotalFrames", "0", comma = false)
-  result.file.write("  },\n")
-  result.file.write("  \"frames\": [\n")
+  if outputPath.len > 0:
+    result.file = open(result.tmpPath, fmWrite)
+    result.opened = true
+
+  if liveOutputPath.len > 0:
+    if fileExists(liveOutputPath):
+      removeFile(liveOutputPath)
+    result.liveFile = open(liveOutputPath, fmWrite)
+    result.liveOpened = true
+    result.liveFile.write(&"{{\"type\":\"meta\",\"version\":1,\"video\":{videoInfoJson(width, height, inputInfo)}}}\n")
+    result.liveFile.flushFile()
+
+  if result.opened:
+    result.file.write("{\n")
+    result.file.write("  \"version\": 1,\n")
+    result.file.write("  \"video\": {\n")
+    result.file.writeJsonField("width", $width)
+    result.file.writeJsonField("height", $height)
+    if inputInfo.hasSourceFps:
+      result.file.writeJsonField("sourceFps", &"{inputInfo.sourceFps:.6f}")
+      result.file.writeJsonField("sourceFpsNum", $inputInfo.sourceFpsNum)
+      result.file.writeJsonField("sourceFpsDen", $inputInfo.sourceFpsDen)
+    else:
+      result.file.writeJsonField("sourceFps", "0.000000")
+      result.file.writeJsonField("sourceFpsNum", "0")
+      result.file.writeJsonField("sourceFpsDen", "0")
+    if inputInfo.hasDuration:
+      result.file.writeJsonField("durationSeconds", &"{inputInfo.durationSeconds:.6f}")
+    else:
+      result.file.writeJsonField("durationSeconds", "0.000000")
+    if inputInfo.hasEstimatedTotalFrames:
+      result.file.writeJsonField("estimatedTotalFrames", $inputInfo.estimatedTotalFrames, comma = false)
+    else:
+      result.file.writeJsonField("estimatedTotalFrames", "0", comma = false)
+    result.file.write("  },\n")
+    result.file.write("  \"frames\": [\n")
 
 proc isOpen(writer: DetectionJsonWriter): bool =
   writer.opened
@@ -829,47 +883,49 @@ proc writeFrameDetections(
     timestampSeconds: float64;
     detections: openArray[Detection]
   ) =
-  if not writer.opened:
+  if not writer.opened and not writer.liveOpened:
     return
 
-  if not writer.firstFrame:
-    writer.file.write(",\n")
-  writer.firstFrame = false
+  if writer.opened:
+    if not writer.firstFrame:
+      writer.file.write(",\n")
+    writer.firstFrame = false
 
-  writer.file.write(&"    {{\"frame\": {frameIndex}, \"time\": {timestampSeconds:.6f}, \"detections\": [")
+    writer.file.write(&"    {{\"frame\": {frameIndex}, \"time\": {timestampSeconds:.6f}, \"detections\": [")
 
-  for i, raw in detections:
-    if i > 0:
-      writer.file.write(",")
+    for i, raw in detections:
+      if i > 0:
+        writer.file.write(",")
+      writer.file.write(raw.detectionToJson(writer.width, writer.height))
 
-    let d = raw.clampDetection(writer.width, writer.height)
-    let
-      nx = d.x / max(1.float32, writer.width.float32)
-      ny = d.y / max(1.float32, writer.height.float32)
-      nw = d.w / max(1.float32, writer.width.float32)
-      nh = d.h / max(1.float32, writer.height.float32)
+    writer.file.write("]}")
 
-    writer.file.write(
-      &"{{\"classId\": {d.classId}, \"label\": {jsonEscapedString(d.label)}, " &
-      &"\"score\": {d.score:.6f}, \"x\": {nx:.6f}, \"y\": {ny:.6f}, " &
-      &"\"w\": {nw:.6f}, \"h\": {nh:.6f}}}"
-    )
+  if writer.liveOpened:
+    writer.liveFile.write(&"{{\"type\":\"frame\",\"frame\":{frameIndex},\"time\":{timestampSeconds:.6f},\"detections\":[")
+    for i, raw in detections:
+      if i > 0:
+        writer.liveFile.write(",")
+      writer.liveFile.write(raw.detectionToJson(writer.width, writer.height))
+    writer.liveFile.write("]}\n")
+    writer.liveFile.flushFile()
 
-  writer.file.write("]}")
   inc writer.frameCount
   writer.detectionCount += detections.len
 
 proc closeDetectionJsonWriter(writer: var DetectionJsonWriter) =
-  if not writer.opened:
-    return
+  if writer.opened:
+    writer.file.write("\n  ],\n")
+    writer.file.write(&"  \"frameCount\": {writer.frameCount},\n")
+    writer.file.write(&"  \"detectionCount\": {writer.detectionCount}\n")
+    writer.file.write("}\n")
+    writer.file.close()
+    writer.opened = false
+    writer.moveDetectionJsonIntoPlace()
 
-  writer.file.write("\n  ],\n")
-  writer.file.write(&"  \"frameCount\": {writer.frameCount},\n")
-  writer.file.write(&"  \"detectionCount\": {writer.detectionCount}\n")
-  writer.file.write("}\n")
-  writer.file.close()
-  writer.opened = false
-  writer.moveDetectionJsonIntoPlace()
+  if writer.liveOpened:
+    writer.liveFile.write(&"{{\"type\":\"done\",\"frameCount\":{writer.frameCount},\"detectionCount\":{writer.detectionCount}}}\n")
+    writer.liveFile.close()
+    writer.liveOpened = false
 
 proc abortDetectionJsonWriter(writer: var DetectionJsonWriter) =
   if writer.opened:
@@ -883,6 +939,12 @@ proc abortDetectionJsonWriter(writer: var DetectionJsonWriter) =
       removeFile(writer.tmpPath)
     except OSError:
       discard
+  if writer.liveOpened:
+    try:
+      writer.liveFile.close()
+    except IOError:
+      discard
+    writer.liveOpened = false
 
 proc setClassColor(ctx: Context; classId: int) =
   case classId mod 4
@@ -1603,6 +1665,7 @@ type
     outputPath: SharedCString
     previewOutputPath: SharedCString
     detectionsOutputPath: SharedCString
+    liveDetectionsOutputPath: SharedCString
     fontPath: SharedCString
     fpsNum: int
     fpsDen: int
@@ -1879,6 +1942,7 @@ proc videoPipelineConsumerMain(state: VideoPipelineWorkerState) {.thread.} =
       outputPath = state.outputPath.toLocalString()
       previewOutputPath = state.previewOutputPath.toLocalString()
       detectionsOutputPath = state.detectionsOutputPath.toLocalString()
+      liveDetectionsOutputPath = state.liveDetectionsOutputPath.toLocalString()
       fontPath = state.fontPath.toLocalString()
       encoderName = state.encoderName.toLocalString()
       loadedFont = loadOverlayFont(fontPath)
@@ -1929,6 +1993,7 @@ proc videoPipelineConsumerMain(state: VideoPipelineWorkerState) {.thread.} =
             workerResult.stats.writerOpenMs = elapsedMs(stageStart)
             detectionsWriter = openDetectionJsonWriter(
               detectionsOutputPath,
+              liveDetectionsOutputPath,
               frameW,
               frameH,
               state.progressInfo
@@ -2063,7 +2128,8 @@ proc drawMp4VideoOverlayThreaded(
     options: JobOptions = defaultJobOptions();
     onProgress: OverlayProgressCallback = nil;
     progressCtx: pointer = nil;
-    detectionsOutputPath = ""
+    detectionsOutputPath = "";
+    liveDetectionsOutputPath = ""
   ): OverlayStats =
   ## Step 6 video pipeline.
   ##
@@ -2103,6 +2169,7 @@ proc drawMp4VideoOverlayThreaded(
     sharedOutputPath = initSharedCString(outputPath)
     sharedPreviewOutputPath = initSharedCString(previewOutputPath)
     sharedDetectionsOutputPath = initSharedCString(detectionsOutputPath)
+    sharedLiveDetectionsOutputPath = initSharedCString(liveDetectionsOutputPath)
     sharedFontPath = initSharedCString(fontPath)
     sharedEncoderName = initSharedCString(encoderName)
 
@@ -2128,6 +2195,7 @@ proc drawMp4VideoOverlayThreaded(
       outputPath: sharedOutputPath,
       previewOutputPath: sharedPreviewOutputPath,
       detectionsOutputPath: sharedDetectionsOutputPath,
+      liveDetectionsOutputPath: sharedLiveDetectionsOutputPath,
       fontPath: sharedFontPath,
       fpsNum: outputFps.num,
       fpsDen: outputFps.den,
@@ -2246,6 +2314,7 @@ proc drawMp4VideoOverlayThreaded(
     sharedOutputPath.freeSharedCString()
     sharedPreviewOutputPath.freeSharedCString()
     sharedDetectionsOutputPath.freeSharedCString()
+    sharedLiveDetectionsOutputPath.freeSharedCString()
     sharedFontPath.freeSharedCString()
     sharedEncoderName.freeSharedCString()
 
@@ -2273,6 +2342,7 @@ proc drawMp4VideoOverlayThreaded(
       sharedOutputPath.freeSharedCString()
       sharedPreviewOutputPath.freeSharedCString()
       sharedDetectionsOutputPath.freeSharedCString()
+      sharedLiveDetectionsOutputPath.freeSharedCString()
       sharedFontPath.freeSharedCString()
       sharedEncoderName.freeSharedCString()
     raise
@@ -2283,7 +2353,8 @@ proc drawMp4VideoOverlayLookahead(
     options: JobOptions = defaultJobOptions();
     onProgress: OverlayProgressCallback = nil;
     progressCtx: pointer = nil;
-    detectionsOutputPath = ""
+    detectionsOutputPath = "";
+    liveDetectionsOutputPath = ""
   ): OverlayStats =
   ## Decode the uploaded MP4, run YOLO on each decoded frame, draw bbox/labels,
   ## and encode the result as H.264 MP4.
@@ -2381,6 +2452,7 @@ proc drawMp4VideoOverlayLookahead(
       result.writerOpenMs = elapsedMs(stageStart)
       detectionsWriter = openDetectionJsonWriter(
         detectionsOutputPath,
+        liveDetectionsOutputPath,
         frameRead.frameWidth,
         frameRead.frameHeight,
         progressInfo
@@ -2481,7 +2553,8 @@ proc drawMp4VideoOverlay*(
     options: JobOptions = defaultJobOptions();
     onProgress: OverlayProgressCallback = nil;
     progressCtx: pointer = nil;
-    detectionsOutputPath = ""
+    detectionsOutputPath = "";
+    liveDetectionsOutputPath = ""
   ): OverlayStats =
   if useMp4ThreadPipeline():
     return drawMp4VideoOverlayThreaded(
@@ -2492,7 +2565,8 @@ proc drawMp4VideoOverlay*(
       options,
       onProgress,
       progressCtx,
-      detectionsOutputPath
+      detectionsOutputPath,
+      liveDetectionsOutputPath
     )
 
   result = drawMp4VideoOverlayLookahead(
@@ -2503,7 +2577,8 @@ proc drawMp4VideoOverlay*(
     options,
     onProgress,
     progressCtx,
-    detectionsOutputPath
+    detectionsOutputPath,
+    liveDetectionsOutputPath
   )
 
 proc drawMp4PreviewOverlay*(inputPath, outputPath, fontPath: string): OverlayStats =

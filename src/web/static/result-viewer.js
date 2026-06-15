@@ -19,6 +19,14 @@
 
   const ctx = canvas.getContext('2d');
   const detectionsUrl = root.dataset.detectionsUrl;
+  const liveDetectionsUrl = root.dataset.liveDetectionsUrl;
+  const jobApiUrl = root.dataset.jobApiUrl;
+  const initialJobStatus = root.dataset.jobStatus || '';
+  const generatedOutputCard = document.getElementById('generated-output-card');
+  const generatedOutputProgress = document.getElementById('generated-output-progress');
+  const generatedOutputStatus = document.getElementById('generated-output-status');
+  const downloadOutputLink = document.getElementById('download-output-link');
+  const detectionsOutputLink = document.getElementById('detections-output-link');
   const presets = {
     light: { maxBoxes: 8, maxLabels: 3, minBoxScore: 0.35, minLabelScore: 0.60 },
     balanced: { maxBoxes: 12, maxLabels: 6, minBoxScore: 0.25, minLabelScore: 0.50 },
@@ -26,8 +34,9 @@
     'boxes-only': { maxBoxes: 16, maxLabels: 0, minBoxScore: 0.25, minLabelScore: 1.00 }
   };
 
-  let detections = null;
+  let detections = { version: 1, video: null };
   let frames = [];
+  let framesByIndex = new Map();
   let overlayEnabled = true;
   let lastDrawnFrame = -1;
   let lastCanvasWidth = 0;
@@ -35,9 +44,95 @@
   let rafId = 0;
   let rvfcActive = false;
   let userSeeking = false;
+  let dataStatus = 'loading detections...';
+  let finalLoaded = false;
+  let liveDone = false;
+  let livePollTimer = 0;
+  let liveLineCount = 0;
+  let jobPollTimer = 0;
+  let generatedOutputShown = initialJobStatus === 'done';
 
   function setStatus(text) {
     if (statusText) statusText.textContent = text;
+  }
+
+  function setDataStatus(text) {
+    dataStatus = text;
+    setStatus(text);
+  }
+
+
+
+  function showGeneratedOutput() {
+    if (!generatedOutputCard || generatedOutputShown) return;
+    const outputUrl = generatedOutputCard.dataset.outputUrl || '';
+    if (!outputUrl) return;
+
+    generatedOutputShown = true;
+    generatedOutputCard.classList.remove('pending-output-card');
+    generatedOutputCard.innerHTML = '';
+
+    const title = document.createElement('h3');
+    title.textContent = 'Generated overlay MP4';
+
+    const note = document.createElement('p');
+    note.className = 'muted';
+    note.textContent = 'bbox / label を焼き込んだ生成済みMP4です。ダウンロードにも使えます。';
+
+    const outputVideo = document.createElement('video');
+    outputVideo.className = 'result-media';
+    outputVideo.controls = true;
+    outputVideo.preload = 'metadata';
+    outputVideo.src = outputUrl + '?v=' + Date.now();
+
+    generatedOutputCard.append(title, note, outputVideo);
+  }
+
+  function markJobDone() {
+    showGeneratedOutput();
+    if (downloadOutputLink) downloadOutputLink.hidden = false;
+    if (detectionsOutputLink) {
+      detectionsOutputLink.href = detectionsUrl || detectionsOutputLink.href;
+      detectionsOutputLink.textContent = 'Detection JSON';
+    }
+  }
+
+  function updatePendingOutput(job) {
+    if (!job || job.status === 'done') {
+      markJobDone();
+      return;
+    }
+
+    if (generatedOutputProgress && Number.isFinite(Number(job.progress))) {
+      generatedOutputProgress.value = Number(job.progress);
+    }
+    if (generatedOutputStatus) {
+      const message = job.message ? ` ${job.message}` : '';
+      generatedOutputStatus.textContent = `Generated overlay MP4 is still processing.${message}`;
+    }
+  }
+
+  async function pollJobStatus() {
+    if (!jobApiUrl || generatedOutputShown) return;
+    try {
+      const res = await fetch(jobApiUrl + '?v=' + Date.now(), { cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const job = await res.json();
+      updatePendingOutput(job);
+      if (job.status === 'done') {
+        await loadFinalDetections(false);
+        return;
+      }
+      if (job.status === 'failed') {
+        if (generatedOutputStatus) {
+          generatedOutputStatus.textContent = `Generated overlay MP4 failed: ${job.message || 'unknown error'}`;
+        }
+        return;
+      }
+    } catch (err) {
+      if (generatedOutputStatus) generatedOutputStatus.textContent = `Job status update failed: ${err.message}`;
+    }
+    jobPollTimer = setTimeout(pollJobStatus, 1000);
   }
 
   function currentPreset() {
@@ -105,6 +200,44 @@
     }
 
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return true;
+  }
+
+  function rebuildFrames() {
+    frames = Array.from(framesByIndex.values()).sort((a, b) => {
+      const at = Number.isFinite(a.time) ? a.time : 0;
+      const bt = Number.isFinite(b.time) ? b.time : 0;
+      if (at !== bt) return at - bt;
+      return Number(a.frame) - Number(b.frame);
+    });
+  }
+
+  function normalizeFrame(frame) {
+    const frameIndex = Number(frame.frame);
+    const time = Number(frame.time);
+    if (!Number.isFinite(frameIndex) || !Number.isFinite(time)) return null;
+    return {
+      frame: frameIndex,
+      time,
+      detections: Array.isArray(frame.detections) ? frame.detections : []
+    };
+  }
+
+  function setFinalFrames(json) {
+    detections = json || { version: 1, video: null };
+    framesByIndex = new Map();
+    const list = Array.isArray(detections.frames) ? detections.frames : [];
+    for (const frame of list) {
+      const normalized = normalizeFrame(frame);
+      if (normalized) framesByIndex.set(normalized.frame, normalized);
+    }
+    rebuildFrames();
+  }
+
+  function addLiveFrame(frame) {
+    const normalized = normalizeFrame(frame);
+    if (!normalized) return false;
+    framesByIndex.set(normalized.frame, normalized);
     return true;
   }
 
@@ -195,14 +328,21 @@
   function drawForTime(time) {
     updatePlaybackUi();
 
-    if (!overlayEnabled || !detections || !resizeCanvas()) {
+    if (!overlayEnabled || !resizeCanvas()) {
       if (!overlayEnabled) clearOverlay();
+      return;
+    }
+
+    if (!frames.length) {
+      clearOverlay();
+      setStatus(dataStatus);
       return;
     }
 
     const frame = frameForTime(time);
     if (!frame) {
       clearOverlay();
+      setStatus(`${dataStatus}; no frame data at ${formatTime(time)}`);
       return;
     }
 
@@ -243,12 +383,120 @@
       }
     }
 
-    setStatus(`frame ${frame.frame}, ${items.length} boxes`);
+    const source = finalLoaded ? 'final' : (liveDone ? 'live done' : 'live');
+    setStatus(`${source}: ${frames.length} frames, showing frame ${frame.frame}, ${items.length} boxes`);
   }
 
   function redraw() {
     lastDrawnFrame = -1;
     drawForTime(video.currentTime || 0);
+  }
+
+  async function loadFinalDetections(reportErrors = true) {
+    if (!detectionsUrl || finalLoaded) return finalLoaded;
+    try {
+      const res = await fetch(detectionsUrl + '?v=' + Date.now(), { cache: 'no-store' });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const json = await res.json();
+      setFinalFrames(json);
+      finalLoaded = true;
+      liveDone = true;
+      if (livePollTimer) {
+        clearTimeout(livePollTimer);
+        livePollTimer = 0;
+      }
+      setDataStatus(`loaded ${frames.length} final frames`);
+      markJobDone();
+      redraw();
+      return true;
+    } catch (err) {
+      if (reportErrors) setDataStatus(`failed to load detections: ${err.message}`);
+      return false;
+    }
+  }
+
+  function handleLiveRecord(record) {
+    if (!record || typeof record !== 'object') return false;
+
+    if (record.type === 'meta') {
+      detections.version = record.version || detections.version || 1;
+      detections.video = record.video || detections.video || null;
+      return false;
+    }
+
+    if (record.type === 'done') {
+      liveDone = true;
+      return false;
+    }
+
+    if (record.type === 'frame') {
+      return addLiveFrame(record);
+    }
+
+    if (Number.isFinite(Number(record.frame)) && Array.isArray(record.detections)) {
+      return addLiveFrame(record);
+    }
+
+    return false;
+  }
+
+  async function pollLiveDetections() {
+    if (!liveDetectionsUrl || finalLoaded) return;
+
+    let changed = false;
+    try {
+      const res = await fetch(liveDetectionsUrl + '?v=' + Date.now(), { cache: 'no-store' });
+      if (res.status === 404) {
+        setDataStatus('waiting for live detections...');
+      } else if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      } else {
+        const text = await res.text();
+        const rawLines = text.split(/\r?\n/);
+        let parseLimit = rawLines.length;
+        if (parseLimit > 0 && rawLines[parseLimit - 1].trim() !== '') {
+          parseLimit -= 1;
+        }
+
+        let nextLineCount = Math.min(liveLineCount, parseLimit);
+        for (let i = nextLineCount; i < parseLimit; i += 1) {
+          const line = rawLines[i].trim();
+          if (!line) {
+            nextLineCount = i + 1;
+            continue;
+          }
+
+          try {
+            const record = JSON.parse(line);
+            if (handleLiveRecord(record)) changed = true;
+            nextLineCount = i + 1;
+          } catch (_err) {
+            break;
+          }
+        }
+        liveLineCount = nextLineCount;
+
+        if (changed) {
+          rebuildFrames();
+          setDataStatus(`live ${frames.length} frames loaded`);
+          redraw();
+        } else if (!frames.length && !liveDone) {
+          setDataStatus('waiting for live detections...');
+        }
+      }
+    } catch (err) {
+      setDataStatus(`live detections: ${err.message}`);
+    }
+
+    if (liveDone) {
+      setDataStatus(`finalizing detections... (${frames.length} live frames)`);
+      await loadFinalDetections(false);
+      if (finalLoaded) return;
+    }
+
+    if (!finalLoaded) {
+      livePollTimer = setTimeout(pollLiveDetections, liveDone ? 1500 : 750);
+    }
   }
 
   function scheduleVideoFrameCallback() {
@@ -372,20 +620,14 @@
   document.addEventListener('fullscreenchange', redraw);
 
   updatePlaybackUi();
+  if (initialJobStatus !== 'done') pollJobStatus();
 
-  fetch(detectionsUrl, { cache: 'no-store' })
-    .then((res) => {
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      return res.json();
-    })
-    .then((json) => {
-      detections = json;
-      frames = Array.isArray(json.frames) ? json.frames.slice().sort((a, b) => a.time - b.time) : [];
-      setStatus(`loaded ${frames.length} frames`);
-      redraw();
-    })
-    .catch((err) => {
-      setStatus(`failed to load detections: ${err.message}`);
-      clearOverlay();
+  if (initialJobStatus === 'done') {
+    loadFinalDetections(true).then((ok) => {
+      if (!ok && liveDetectionsUrl) pollLiveDetections();
     });
+  } else {
+    setDataStatus('waiting for live detections...');
+    pollLiveDetections();
+  }
 })();
