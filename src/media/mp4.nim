@@ -5,11 +5,14 @@
 ## and also converts the same frame into a Pixie RGBX image for overlay drawing.
 
 import pixie
-import std/[strformat, times]
+import std/[os, strformat, times]
 
 import libav_nim
 
 import ./convert
+
+const
+  DefaultMp4DecoderName = "h264_v4l2m2m"
 
 type
   PixelSeqHolder = ref object
@@ -22,6 +25,8 @@ type
     image*: Image
     yoloInput*: YoloInputImage
     decodeMs*: int
+    decoderOpenMs*: int
+    readFrameMs*: int
     letterboxMs*: int
     rgbxMs*: int
     frameWidth*: int
@@ -33,6 +38,20 @@ proc elapsedMs(start: float): int =
   result = int((epochTime() - start) * 1000.0 + 0.5)
   if result < 0:
     result = 0
+
+proc resolveMp4DecoderName(requested: string): string =
+  ## Use the SoC hardware decoder by default.
+  ##
+  ## Set HAILO_DEMO_MP4_DECODER=auto to let libav choose a decoder, or set it
+  ## to hevc_v4l2m2m for HEVC test files.
+  if requested.len > 0:
+    return requested
+
+  let envName = getEnv("HAILO_DEMO_MP4_DECODER", DefaultMp4DecoderName)
+  if envName == "auto":
+    result = ""
+  else:
+    result = envName
 
 proc checkAv[T](ret: FFmpegResult[T]; context: string): T =
   if ret.isErr:
@@ -76,23 +95,31 @@ proc decodeMp4PreviewFrame*(inputPath: string; decoderName = ""): Mp4PreviewFram
   ## decoder is closed or reused.
   let totalStart = epochTime()
 
+  let
+    actualDecoderName = resolveMp4DecoderName(decoderName)
+    actualDecoderLabel = if actualDecoderName.len > 0: actualDecoderName else: "auto"
+
+  var stageStart = epochTime()
   var decoder = checkAv(
-    openVideoDecoder(inputPath, DecoderOptions(decoderName: decoderName)),
-    "openVideoDecoder"
+    openVideoDecoder(inputPath, DecoderOptions(decoderName: actualDecoderName)),
+    &"openVideoDecoder decoder={actualDecoderLabel}"
   )
+  result.decoderOpenMs = elapsedMs(stageStart)
   defer: decoder.close()
 
+  stageStart = epochTime()
   let read = checkAv(decoder.readFrame(), "readFrame")
+  result.readFrameMs = elapsedMs(stageStart)
   if read.eof:
     raise newException(IOError, &"MP4 has no decodable video frame: {inputPath}")
 
   result.decodeMs = elapsedMs(totalStart)
-  result.decoderName = decoderName
+  result.decoderName = actualDecoderName
   result.frameIndex = 0
   result.frameWidth = read.frame.width
   result.frameHeight = read.frame.height
 
-  var stageStart = epochTime()
+  stageStart = epochTime()
   result.yoloInput = read.frame.prepareYoloInput()
   result.letterboxMs = elapsedMs(stageStart)
 

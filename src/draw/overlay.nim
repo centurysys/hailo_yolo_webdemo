@@ -30,8 +30,12 @@ type
     detections*: int
     labelsDrawn*: int
     decodeMs*: int
+    decoderOpenMs*: int
+    readFrameMs*: int
+    decoderName*: string
     letterboxMs*: int
     inferMs*: int
+    rgbxMs*: int
     drawMs*: int
     encodeMs*: int
     totalMs*: int
@@ -42,8 +46,20 @@ proc elapsedMs(start: float): int =
     result = 0
 
 proc formatOverlayStats*(s: OverlayStats): string =
-  &"detections={s.detections}, labels={s.labelsDrawn}, image={s.imageWidth}x{s.imageHeight}, total={s.totalMs} ms " &
-  &"(decode={s.decodeMs}, letterbox={s.letterboxMs}, infer={s.inferMs}, draw={s.drawMs}, encode={s.encodeMs})"
+  let base = &"detections={s.detections}, labels={s.labelsDrawn}, image={s.imageWidth}x{s.imageHeight}, total={s.totalMs} ms "
+
+  if s.decoderOpenMs > 0 or s.readFrameMs > 0 or s.rgbxMs > 0:
+    let
+      overlayMs = max(0, s.drawMs - s.rgbxMs)
+      decoderLabel = if s.decoderName.len > 0: s.decoderName else: "auto"
+    result = base &
+      &"(decode={s.decodeMs}[decoder={decoderLabel}, open={s.decoderOpenMs}, read={s.readFrameMs}], " &
+      &"letterbox={s.letterboxMs}, infer={s.inferMs}, " &
+      &"draw={s.drawMs}[rgbx={s.rgbxMs}, overlay={overlayMs}], encode={s.encodeMs})"
+  else:
+    result = base &
+      &"(decode={s.decodeMs}, letterbox={s.letterboxMs}, infer={s.inferMs}, " &
+      &"draw={s.drawMs}, encode={s.encodeMs})"
 
 proc clampf(v, lo, hi: float32): float32 =
   result = max(lo, min(v, hi))
@@ -185,7 +201,11 @@ proc drawMp4PreviewOverlay*(inputPath, outputPath, fontPath: string): OverlaySta
   let preview = decodeMp4PreviewFrame(inputPath)
   var image = preview.image
   result.decodeMs = preview.decodeMs
+  result.decoderOpenMs = preview.decoderOpenMs
+  result.readFrameMs = preview.readFrameMs
+  result.decoderName = preview.decoderName
   result.letterboxMs = preview.letterboxMs
+  result.rgbxMs = preview.rgbxMs
   result.drawMs = preview.rgbxMs
 
   image.finishOverlay(preview.yoloInput, outputPath, fontPath, result, totalStart)
