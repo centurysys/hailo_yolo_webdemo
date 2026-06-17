@@ -9,6 +9,7 @@ import std/[locks, os, strformat, strutils, times]
 
 import ../config
 import ../draw/overlay
+import ../infer/hailo_worker
 import ../types
 
 import ./live_infer_monitor
@@ -24,6 +25,7 @@ const
   EnvInferVerbose = "HAILO_DEMO_LIVE_INFER_VERBOSE"
   EnvAiMaxFrames = "HAILO_DEMO_LIVE_AI_MAX_FRAMES"
   EnvAiPreviewPath = "HAILO_DEMO_LIVE_AI_PREVIEW"
+  EnvAiOverlayPreset = "HAILO_DEMO_LIVE_OVERLAY_PRESET"
 
 type
   InProcessWorkerSnapshot* = object
@@ -131,6 +133,17 @@ proc defaultAiMaxFrames(): int =
 
 proc defaultAiPreviewPath(): string =
   result = getEnv(EnvAiPreviewPath, "/tmp/hailo-live-ai-preview.jpg").strip()
+
+proc parseLiveOverlayPreset(rawValue: string): OverlayPreset =
+  case rawValue.strip().toLowerAscii()
+  of "", "rich", "labels", "label", "with-labels", "with_labels": opRich
+  of "light": opLight
+  of "balanced", "default": opBalanced
+  of "boxes-only", "boxes_only", "boxes", "box": opBoxesOnly
+  else: opRich
+
+proc resolveLiveAiOverlayPreset(): OverlayPreset =
+  result = parseLiveOverlayPreset(getEnv(EnvAiOverlayPreset, "rich"))
 
 proc setWorkerSnapshot(
     state: ptr InProcessWorkerState;
@@ -339,7 +352,7 @@ proc runAiOverlayWorkerMain(state: ptr InProcessWorkerState) =
 
   try:
     var options = defaultJobOptions()
-    options.overlayPreset = opBoxesOnly
+    options.overlayPreset = resolveLiveAiOverlayPreset()
 
     var stats: OverlayStats
     {.cast(gcsafe).}:
@@ -367,6 +380,12 @@ proc runAiOverlayWorkerMain(state: ptr InProcessWorkerState) =
     finalMessage = &"in-process AI overlay worker failed for /{state.cameraId}: {e.msg}"
     echo finalMessage
     applyAiOverlayStats(state, OverlayStats(totalMs: int((epochTime() - startTime) * 1000.0)), false, finalMessage)
+
+  try:
+    {.cast(gcsafe).}:
+      closeHailoWorker()
+  except CatchableError as e:
+    echo &"warning: failed to release HAILO after live AI overlay session for {state.cameraId}: {e.msg}"
 
   setWorkerSnapshot(
     state,
