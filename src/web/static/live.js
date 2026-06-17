@@ -110,17 +110,29 @@ function renderCameraCard(slot) {
     addButton.addEventListener('click', () => openCameraDialog(slot));
     preview.appendChild(addButton);
   } else {
-    const placeholder = document.createElement('div');
-    placeholder.className = 'preview-placeholder';
+    const frame = document.createElement('iframe');
+    frame.className = 'webrtc-preview-frame';
+    frame.src = webrtcUrl(slot);
+    frame.title = `${slot.name || slot.id} WebRTC preview`;
+    frame.loading = 'lazy';
+    frame.allow = 'autoplay; fullscreen; picture-in-picture';
+    preview.appendChild(frame);
+  }
+
+  card.appendChild(preview);
+
+  if (configured) {
+    const meta = document.createElement('div');
+    meta.className = 'camera-preview-meta';
 
     const pathLabel = document.createElement('strong');
     pathLabel.textContent = '/' + slot.mediamtxPath;
-    placeholder.appendChild(pathLabel);
+    meta.appendChild(pathLabel);
 
     const source = document.createElement('span');
     source.className = 'muted one-line';
     source.textContent = slot.source;
-    placeholder.appendChild(source);
+    meta.appendChild(source);
 
     const links = document.createElement('div');
     links.className = 'preview-links';
@@ -139,11 +151,9 @@ function renderCameraCard(slot) {
     hls.textContent = 'HLS';
     links.appendChild(hls);
 
-    placeholder.appendChild(links);
-    preview.appendChild(placeholder);
+    meta.appendChild(links);
+    card.appendChild(meta);
   }
-
-  card.appendChild(preview);
 
   const actions = document.createElement('div');
   actions.className = 'camera-actions';
