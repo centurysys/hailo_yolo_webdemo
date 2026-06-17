@@ -25,7 +25,7 @@ const
   liveFfmpegPath* = "/usr/bin/ffmpeg"
   liveExternalWorkerPath* = "/usr/local/bin/hailo-live-worker"
   liveExternalWorkerArgs* = "--input {input} --output {output}"
-  liveSessionMode* = "in-process"
+  liveSessionMode* = "in-process-ai"
 
   hefPath* = "/usr/local/share/hailo-demo/yolov11s.hef"
   fontPath* = "/usr/share/fonts/dejavu/DejaVuSans.ttf"
@@ -53,7 +53,8 @@ proc getLiveSessionMode*(): string =
   ##   mediamtx-proxy   MediaMTX path proxy only
   ##   ffmpeg-copy      external ffmpeg copy relay
   ##   external-worker  configurable worker command
-  ##   in-process       internal live worker thread
+  ##   in-process       internal ffmpeg-copy live worker thread
+  ##   in-process-ai    internal RTSP -> HAILO -> overlay -> RTSP publisher
   result = getEnv("HAILO_DEMO_LIVE_SESSION_MODE", liveSessionMode)
 
 proc getListenHost*(): string =

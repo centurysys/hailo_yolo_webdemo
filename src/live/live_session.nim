@@ -149,6 +149,8 @@ proc normalizeSessionMode(value: string): string =
     result = "ffmpeg-copy"
   of "external", "external-worker", "worker", "live-worker":
     result = "external-worker"
+  of "in-process-ai", "inprocess-ai", "internal-ai", "thread-ai", "threaded-ai", "ai", "ai-overlay", "live-ai":
+    result = "in-process-ai"
   of "in-process", "inprocess", "internal", "thread", "threaded":
     result = "in-process"
   else:
@@ -274,7 +276,7 @@ proc refreshProcessStateLocked(controller: LiveSessionController) =
 proc refreshInProcessStateLocked(controller: LiveSessionController) =
   if controller.inProcessWorker.isNil:
     return
-  if controller.state.mode != "in-process":
+  if not (controller.state.mode in ["in-process", "in-process-ai"]):
     return
 
   let snap = controller.inProcessWorker.snapshot()
@@ -499,6 +501,86 @@ proc startInProcessWorkerLocked(
     controller.state.stoppedAt = utcStamp()
 
 
+proc startInProcessAiWorkerLocked(
+    controller: LiveSessionController;
+    slot: CameraSlot;
+    inputRtsp, outputPath, outputRtsp: string
+  ) =
+  discard controller.deleteOutputPath(outputPath)
+
+  let args = @[
+    "--input", inputRtsp,
+    "--output", outputRtsp,
+    "--decoder", getEnv("HAILO_DEMO_LIVE_DECODER", "h264_v4l2m2m")
+  ]
+
+  controller.state = LiveSessionState(
+    status: "starting",
+    running: false,
+    mode: "in-process-ai",
+    selectedCameraId: slot.id,
+    selectedCameraName: slot.name,
+    inputMediamtxPath: slot.mediamtxPath,
+    inputRtspUrl: inputRtsp,
+    outputMediamtxPath: outputPath,
+    outputRtspUrl: outputRtsp,
+    aiWebrtcPath: &"/{outputPath}",
+    relayPid: 0,
+    relayCommand: "in-process-ai-overlay",
+    relayArgs: args,
+    lastExitCode: 0,
+    message: &"starting in-process AI overlay pipeline: /{slot.mediamtxPath} -> /{outputPath}",
+    startedAt: utcStamp(),
+    stoppedAt: ""
+  )
+
+  try:
+    controller.inProcessWorker = startInProcessLiveWorker(
+      inputRtsp,
+      outputRtsp,
+      slot.id,
+      slot.name,
+      controller.ffmpegPath,
+      liveInferOwner = controller.liveInferOwner,
+      aiOverlay = true
+    )
+    let snap = controller.inProcessWorker.snapshot()
+    controller.state.relayPid = snap.relayPid
+    controller.state.lastExitCode = snap.exitCode
+    controller.state.liveInferAttempted = snap.liveInferAttempted
+    controller.state.liveInferOk = snap.liveInferOk
+    controller.state.liveInferFrames = snap.liveInferFrames
+    controller.state.liveInferWidth = snap.liveInferWidth
+    controller.state.liveInferHeight = snap.liveInferHeight
+    controller.state.liveInferDetections = snap.liveInferDetections
+    controller.state.liveInferMaxScorePercent = snap.liveInferMaxScorePercent
+    controller.state.liveInferThroughputFps = snap.liveInferThroughputFps
+    controller.state.liveInferProcessingMs = snap.liveInferProcessingMs
+    controller.state.liveInferReadMs = snap.liveInferReadMs
+    controller.state.liveInferLetterboxMs = snap.liveInferLetterboxMs
+    controller.state.liveInferWaitMs = snap.liveInferWaitMs
+    controller.state.liveInferHailoWriteUs = snap.liveInferHailoWriteUs
+    controller.state.liveInferHailoReadUs = snap.liveInferHailoReadUs
+    controller.state.liveInferMessage = snap.liveInferMessage
+    controller.state.status = "running"
+    controller.state.running = true
+    controller.state.message = &"in-process AI overlay pipeline is publishing /{slot.mediamtxPath} to /{outputPath}"
+  except CatchableError as e:
+    if controller.inProcessWorker != nil:
+      let oldWorker = controller.inProcessWorker
+      try:
+        oldWorker.close()
+      except CatchableError:
+        discard
+      controller.retiredInProcessWorkers.add(oldWorker)
+      controller.inProcessWorker = nil
+    controller.state.status = "error"
+    controller.state.running = false
+    controller.state.lastExitCode = -1
+    controller.state.message = &"failed to start in-process AI overlay pipeline: {e.msg}"
+    controller.state.stoppedAt = utcStamp()
+
+
 proc startExternalWorkerLocked(
     controller: LiveSessionController;
     slot: CameraSlot;
@@ -719,6 +801,8 @@ proc startSession*(
       discard controller.deleteOutputPath(outputPath)
 
       case controller.sessionMode
+      of "in-process-ai":
+        controller.startInProcessAiWorkerLocked(slot, inputRtsp, outputPath, outputRtsp)
       of "in-process":
         controller.startInProcessWorkerLocked(slot, inputRtsp, outputPath, outputRtsp)
       of "ffmpeg-copy":

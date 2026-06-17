@@ -88,6 +88,7 @@ type
     totalMs*: int
 
   OverlayProgressCallback* = proc(ctx: pointer; progress: int; message: string) {.gcsafe.}
+  OverlayStopCallback* = proc(ctx: pointer): bool {.gcsafe.}
 
   VideoProgressInfo = object
     durationSeconds: float64
@@ -270,6 +271,15 @@ proc notifyProgress(
   ) {.gcsafe.} =
   if onProgress != nil:
     onProgress(progressCtx, progress, message)
+
+
+proc overlayStopRequested(
+    shouldStop: OverlayStopCallback;
+    stopCtx: pointer
+  ): bool {.gcsafe.} =
+  if shouldStop == nil:
+    return false
+  result = shouldStop(stopCtx)
 
 
 proc formatBytes(value: int64): string =
@@ -2853,7 +2863,9 @@ proc drawLiveRtspVideoOverlayToRtsp*(
     onProgress: OverlayProgressCallback = nil;
     progressCtx: pointer = nil;
     detectionsOutputPath = "";
-    liveDetectionsOutputPath = ""
+    liveDetectionsOutputPath = "";
+    shouldStop: OverlayStopCallback = nil;
+    stopCtx: pointer = nil
   ): OverlayStats =
   ## Bounded live RTSP -> decoded frame source -> MP4-proven overlay pipeline
   ## -> RTSP publish probe.
@@ -2953,11 +2965,17 @@ proc drawLiveRtspVideoOverlayToRtsp*(
       pooledHeight = 0
 
     while result.pipelineSubmitted < actualMaxFrames:
+      if overlayStopRequested(shouldStop, stopCtx):
+        appendRtspPublisherLog(rtspPublisherLogPath(), &"producer stop requested submitted={result.pipelineSubmitted}\n")
+        break
       if result.pipelineSubmitted < 5 or (result.pipelineSubmitted mod 30) == 0:
         appendRtspPublisherLog(rtspPublisherLogPath(), &"producer reading frame submitted={result.pipelineSubmitted}\n")
       let frameRead = source.readDecodedFrame()
       if result.pipelineSubmitted < 5 or (result.pipelineSubmitted mod 30) == 0:
         appendRtspPublisherLog(rtspPublisherLogPath(), &"producer read status={frameRead.status} submitted={result.pipelineSubmitted}\n")
+      if overlayStopRequested(shouldStop, stopCtx):
+        appendRtspPublisherLog(rtspPublisherLogPath(), &"producer stop requested after read submitted={result.pipelineSubmitted}\n")
+        break
       case frameRead.status
       of dvrsFrame:
         if result.pipelineSubmitted < 5 or (result.pipelineSubmitted mod 30) == 0:

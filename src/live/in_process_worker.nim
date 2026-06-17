@@ -5,7 +5,11 @@
 ## HAILO worker must be owned by a long-lived thread, not by this transient live
 ## session worker.
 
-import std/[locks, os, strformat, strutils]
+import std/[locks, os, strformat, strutils, times]
+
+import ../config
+import ../draw/overlay
+import ../types
 
 import ./live_infer_monitor
 import ./live_infer_owner
@@ -18,6 +22,8 @@ const
   EnvInferInflight = "HAILO_DEMO_LIVE_INFER_INFLIGHT"
   EnvInferDecoder = "HAILO_DEMO_LIVE_DECODER"
   EnvInferVerbose = "HAILO_DEMO_LIVE_INFER_VERBOSE"
+  EnvAiMaxFrames = "HAILO_DEMO_LIVE_AI_MAX_FRAMES"
+  EnvAiPreviewPath = "HAILO_DEMO_LIVE_AI_PREVIEW"
 
 type
   InProcessWorkerSnapshot* = object
@@ -70,6 +76,9 @@ type
     inferVerbose: bool
     inferOwner: LiveInferOwner
     inferOwnerGeneration: uint64
+    aiOverlay: bool
+    aiMaxFrames: int
+    aiPreviewPath: string
 
   InProcessLiveWorker* = ref object
     thread: Thread[ptr InProcessWorkerState]
@@ -115,6 +124,14 @@ proc defaultInferInFlight(): int =
 proc defaultInferVerbose(): bool =
   result = parseEnvBool(EnvInferVerbose, false)
 
+proc defaultAiMaxFrames(): int =
+  ## Long bounded default for demo live sessions.  Stop requests still ask the
+  ## overlay producer to break before this limit.
+  result = parseEnvInt(EnvAiMaxFrames, 216000, 1, high(int) div 4)
+
+proc defaultAiPreviewPath(): string =
+  result = getEnv(EnvAiPreviewPath, "/tmp/hailo-live-ai-preview.jpg").strip()
+
 proc setWorkerSnapshot(
     state: ptr InProcessWorkerState;
     started, running, finished: bool;
@@ -154,7 +171,7 @@ proc applyInferSummary(state: ptr InProcessWorkerState; summary: LiveInferMonito
     state.snapshot.liveInferMessage = summary.message
     state.snapshot.stopRequested = state.stopRequested
 
-proc workerStopRequested(state: ptr InProcessWorkerState): bool =
+proc workerStopRequested(state: ptr InProcessWorkerState): bool {.gcsafe.} =
   withLock state.lock:
     result = state.stopRequested
 
@@ -273,6 +290,95 @@ proc runOptionalInferMonitor(state: ptr InProcessWorkerState) {.gcsafe.} =
       state.snapshot.stopRequested = state.stopRequested
     echo msg
 
+proc liveAiOverlayStopRequested(ctx: pointer): bool {.gcsafe.} =
+  let state = cast[ptr InProcessWorkerState](ctx)
+  if state == nil:
+    return true
+  result = workerStopRequested(state)
+
+proc applyAiOverlayStats(
+    state: ptr InProcessWorkerState;
+    stats: OverlayStats;
+    ok: bool;
+    message: string
+  ) {.gcsafe.} =
+  withLock state.lock:
+    state.snapshot.liveInferAttempted = true
+    state.snapshot.liveInferOk = ok
+    state.snapshot.liveInferFrames = stats.videoFrames
+    state.snapshot.liveInferWidth = stats.imageWidth
+    state.snapshot.liveInferHeight = stats.imageHeight
+    state.snapshot.liveInferDetections = stats.detections
+    state.snapshot.liveInferMaxScorePercent = 0
+    state.snapshot.liveInferThroughputFps = if stats.totalMs > 0: float64(stats.videoFrames) * 1000.0 / float64(stats.totalMs) else: 0.0
+    state.snapshot.liveInferProcessingMs = stats.totalMs
+    state.snapshot.liveInferReadMs = stats.readFrameMs
+    state.snapshot.liveInferLetterboxMs = stats.letterboxMs
+    state.snapshot.liveInferWaitMs = stats.inferWaitMs
+    state.snapshot.liveInferHailoWriteUs = stats.hailoWriteUs
+    state.snapshot.liveInferHailoReadUs = stats.hailoReadUs
+    state.snapshot.liveInferMessage = message
+    state.snapshot.stopRequested = state.stopRequested
+
+proc runAiOverlayWorkerMain(state: ptr InProcessWorkerState) =
+  echo &"in-process AI overlay worker thread started for {state.cameraId} ({state.cameraName})"
+
+  var finalExitCode = 0
+  var finalMessage = ""
+  let startTime = epochTime()
+
+  setWorkerSnapshot(
+    state,
+    started = true,
+    running = true,
+    finished = false,
+    relayPid = 0,
+    exitCode = 0,
+    message = &"in-process AI overlay worker is publishing {state.inputRtsp} -> {state.outputRtsp}"
+  )
+
+  try:
+    var options = defaultJobOptions()
+    options.overlayPreset = opBoxesOnly
+
+    var stats: OverlayStats
+    {.cast(gcsafe).}:
+      stats = drawLiveRtspVideoOverlayToRtsp(
+        state.inputRtsp,
+        state.outputRtsp,
+        fontPath,
+        decoderName = state.inferDecoderName,
+        maxFrames = state.aiMaxFrames,
+        previewOutputPath = state.aiPreviewPath,
+        options = options,
+        shouldStop = liveAiOverlayStopRequested,
+        stopCtx = cast[pointer](state)
+      )
+
+    let stoppedByUser = workerStopRequested(state)
+    finalExitCode = 0
+    if stoppedByUser:
+      finalMessage = &"in-process AI overlay worker stopped for /{state.cameraId} after {stats.videoFrames} frame(s)"
+    else:
+      finalMessage = &"in-process AI overlay worker completed after {stats.videoFrames} frame(s)"
+    applyAiOverlayStats(state, stats, true, finalMessage)
+  except CatchableError as e:
+    finalExitCode = -1
+    finalMessage = &"in-process AI overlay worker failed for /{state.cameraId}: {e.msg}"
+    echo finalMessage
+    applyAiOverlayStats(state, OverlayStats(totalMs: int((epochTime() - startTime) * 1000.0)), false, finalMessage)
+
+  setWorkerSnapshot(
+    state,
+    started = true,
+    running = false,
+    finished = true,
+    relayPid = 0,
+    exitCode = finalExitCode,
+    message = finalMessage
+  )
+  echo &"in-process AI overlay worker thread stopped for {state.cameraId}: {finalMessage}"
+
 proc buildRunningMessage(state: ptr InProcessWorkerState): string =
   var inferPart = "inference monitor is disabled"
   withLock state.lock:
@@ -281,10 +387,17 @@ proc buildRunningMessage(state: ptr InProcessWorkerState): string =
         inferPart = &"live async inference monitor: {state.snapshot.liveInferFrames} frame(s), {state.snapshot.liveInferThroughputFps:.2f} fps"
       else:
         inferPart = state.snapshot.liveInferMessage
-  result = &"in-process live worker is publishing /{state.cameraId} to /cam-ai via ffmpeg-copy pipeline; {inferPart}"
+  if state.aiOverlay:
+    result = &"in-process AI overlay worker is publishing /{state.cameraId} to /cam-ai; {inferPart}"
+  else:
+    result = &"in-process live worker is publishing /{state.cameraId} to /cam-ai via ffmpeg-copy pipeline; {inferPart}"
 
 proc inProcessWorkerMain(state: ptr InProcessWorkerState) {.thread.} =
   echo &"in-process live worker thread started for {state.cameraId} ({state.cameraName})"
+
+  if state.aiOverlay:
+    runAiOverlayWorkerMain(state)
+    return
 
   var pipeline: LivePipelineHandle = nil
   var relayPid = 0
@@ -423,16 +536,21 @@ proc startInProcessLiveWorker*(
     inferWarmupFrames = -1;
     inferInFlight = -1;
     inferVerbose = false;
-    liveInferOwner: LiveInferOwner = nil
+    liveInferOwner: LiveInferOwner = nil;
+    aiOverlay = false;
+    aiMaxFrames = -1;
+    aiPreviewPath = ""
   ): InProcessLiveWorker =
   ## Start the internal live worker thread.
   ##
-  ## The ffmpeg-copy preview path remains the output path.  Optional live
-  ## inference monitoring is delegated to a long-lived LiveInferOwner thread.
-  if ffmpegPath.len == 0:
+  ## The normal in-process mode keeps the ffmpeg-copy preview path.  The AI
+  ## overlay mode runs the libav-backed live RTSP -> HAILO -> overlay -> RTSP
+  ## publisher in this worker thread and does not spawn ffmpeg.
+  if not aiOverlay and ffmpegPath.len == 0:
     raise newException(IOError, "ffmpeg path is empty")
 
-  echo &"starting in-process live worker for {cameraId} ({cameraName}): {inputRtsp} -> {outputRtsp}"
+  let modeLabel = if aiOverlay: "AI overlay" else: "ffmpeg-copy"
+  echo &"starting in-process live worker ({modeLabel}) for {cameraId} ({cameraName}): {inputRtsp} -> {outputRtsp}"
 
   result = InProcessLiveWorker()
   initLock(result.state.lock)
@@ -461,6 +579,9 @@ proc startInProcessLiveWorker*(
   result.state.inferVerbose = inferVerbose or defaultInferVerbose()
   result.state.inferOwner = liveInferOwner
   result.state.inferOwnerGeneration = 0'u64
+  result.state.aiOverlay = aiOverlay
+  result.state.aiMaxFrames = if aiMaxFrames > 0: aiMaxFrames else: defaultAiMaxFrames()
+  result.state.aiPreviewPath = if aiPreviewPath.strip().len > 0: aiPreviewPath.strip() else: defaultAiPreviewPath()
   result.joined = false
   result.closed = false
 
