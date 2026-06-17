@@ -1,19 +1,17 @@
 ## In-process live worker media-output scaffold.
 ##
 ## The compact demo keeps live-session control inside the main
-## hailo_yolo_webdemo process.  This worker still uses ffmpeg as a temporary
-## copy-relay media backend, but the process is owned by the internal live
-## worker thread instead of by live_session.nim directly.
-##
-## This revision adds a small worker status snapshot so the session controller
-## can detect ffmpeg start, normal exit, and unexpected exit while the UI is
-## polling /api/live/session.
+## hailo_yolo_webdemo process.  The current media backend is still an ffmpeg
+## copy-relay, but it is now routed through live_pipeline.nim so this worker can
+## later switch to a real decode -> infer -> overlay -> encode pipeline without
+## changing the session controller.
 
-import std/[locks, os, osproc, strformat, strutils]
+import std/[locks, os, strformat]
+
+import ./live_pipeline
 
 const
   DefaultPollIntervalMs = 200
-
 
 type
   InProcessWorkerSnapshot* = object
@@ -40,23 +38,6 @@ type
     state: InProcessWorkerState
     joined: bool
     closed: bool
-
-
-proc ffmpegCopyArgs(inputRtsp, outputRtsp: string): seq[string] =
-  @[
-    "-nostdin",
-    "-hide_banner",
-    "-loglevel", "warning",
-    "-rtsp_transport", "tcp",
-    "-fflags", "nobuffer",
-    "-flags", "low_delay",
-    "-i", inputRtsp,
-    "-an",
-    "-c:v", "copy",
-    "-rtsp_transport", "tcp",
-    "-f", "rtsp",
-    outputRtsp
-  ]
 
 proc setWorkerSnapshot(
     state: ptr InProcessWorkerState;
@@ -91,48 +72,10 @@ proc requestStop(worker: InProcessLiveWorker) =
     if worker.state.snapshot.running:
       worker.state.snapshot.message = &"stop requested for in-process live worker on /{worker.state.cameraId}"
 
-proc startCopyRelay(state: ptr InProcessWorkerState): Process =
-  if state.ffmpegPath.len == 0:
-    raise newException(IOError, "ffmpeg path is empty")
-  if state.ffmpegPath.contains("/") and not fileExists(state.ffmpegPath):
-    raise newException(IOError, &"ffmpeg not found: {state.ffmpegPath}")
-
-  let args = ffmpegCopyArgs(state.inputRtsp, state.outputRtsp)
-  echo "in-process live worker exec: ", state.ffmpegPath, " ", args.join(" ")
-  result = startProcess(
-    state.ffmpegPath,
-    args = args,
-    options = {poUsePath, poParentStreams}
-  )
-
-proc stopCopyRelay(process: var Process): int =
-  result = 0
-  if process.isNil:
-    return
-
-  try:
-    if process.running():
-      process.terminate()
-      result = process.waitForExit()
-    else:
-      result = process.waitForExit()
-  except CatchableError:
-    try:
-      process.kill()
-      result = process.waitForExit()
-    except CatchableError:
-      result = -1
-
-  try:
-    process.close()
-  except CatchableError:
-    discard
-  process = nil
-
 proc inProcessWorkerMain(state: ptr InProcessWorkerState) {.thread.} =
   echo &"in-process live worker thread started for {state.cameraId} ({state.cameraName})"
 
-  var relayProcess: Process = nil
+  var pipeline: LivePipelineHandle = nil
   var relayPid = 0
   var finalExitCode = 0
   var finalMessage = ""
@@ -144,14 +87,21 @@ proc inProcessWorkerMain(state: ptr InProcessWorkerState) {.thread.} =
     finished = false,
     relayPid = 0,
     exitCode = 0,
-    message = &"in-process live worker is starting ffmpeg copy relay for /{state.cameraId}"
+    message = &"in-process live worker is starting ffmpeg-copy pipeline for /{state.cameraId}"
   )
 
   try:
     try:
-      relayProcess = startCopyRelay(state)
-      relayPid = relayProcess.processID()
-      finalMessage = &"in-process live worker is publishing {state.inputRtsp} -> {state.outputRtsp}"
+      pipeline = startLivePipeline(LivePipelineStartConfig(
+        backend: lpbFfmpegCopy,
+        ffmpegPath: state.ffmpegPath,
+        inputRtsp: state.inputRtsp,
+        outputRtsp: state.outputRtsp,
+        cameraId: state.cameraId,
+        cameraName: state.cameraName
+      ))
+      relayPid = pipeline.relayPid
+      finalMessage = &"in-process live worker is publishing {state.inputRtsp} -> {state.outputRtsp} via ffmpeg-copy pipeline"
       setWorkerSnapshot(
         state,
         started = true,
@@ -164,7 +114,7 @@ proc inProcessWorkerMain(state: ptr InProcessWorkerState) {.thread.} =
       echo finalMessage
     except CatchableError as e:
       finalExitCode = -1
-      finalMessage = &"in-process live worker failed to start copy relay: {e.msg}"
+      finalMessage = &"in-process live worker failed to start pipeline: {e.msg}"
       echo finalMessage
       setWorkerSnapshot(
         state,
@@ -179,37 +129,48 @@ proc inProcessWorkerMain(state: ptr InProcessWorkerState) {.thread.} =
 
     while true:
       if workerStopRequested(state):
-        setWorkerMessage(state, &"stopping in-process live worker copy relay for /{state.cameraId}")
-        finalExitCode = stopCopyRelay(relayProcess)
-        finalMessage = &"in-process live worker stopped copy relay for /{state.cameraId}"
+        setWorkerMessage(state, &"stopping in-process live worker pipeline for /{state.cameraId}")
+        let stopped = pipeline.stop()
+        finalExitCode = stopped.exitCode
+        finalMessage = &"in-process live worker stopped pipeline for /{state.cameraId}"
         break
 
-      if relayProcess.isNil:
+      if pipeline.isNil:
         finalExitCode = -1
-        finalMessage = "in-process live worker copy relay disappeared"
+        finalMessage = "in-process live worker pipeline disappeared"
         break
 
-      if not relayProcess.running():
-        finalExitCode = relayProcess.waitForExit()
-        try:
-          relayProcess.close()
-        except CatchableError:
-          discard
-        relayProcess = nil
-        if finalExitCode == 0:
-          finalMessage = &"in-process live worker copy relay exited for /{state.cameraId}"
+      let pollRes = pipeline.poll()
+      relayPid = pollRes.relayPid
+      if pollRes.finished:
+        finalExitCode = pollRes.exitCode
+        if pollRes.message.len > 0:
+          finalMessage = pollRes.message
+        elif finalExitCode == 0:
+          finalMessage = &"in-process live worker pipeline exited for /{state.cameraId}"
         else:
-          finalMessage = &"in-process live worker copy relay exited with code {finalExitCode} for /{state.cameraId}"
+          finalMessage = &"in-process live worker pipeline exited with code {finalExitCode} for /{state.cameraId}"
         break
+
+      setWorkerSnapshot(
+        state,
+        started = true,
+        running = true,
+        finished = false,
+        relayPid = pollRes.relayPid,
+        exitCode = pollRes.exitCode,
+        message = &"in-process live worker is publishing /{state.cameraId} to /cam-ai via ffmpeg-copy pipeline; inference stage is not connected yet"
+      )
 
       sleep(DefaultPollIntervalMs)
 
   finally:
-    if relayProcess != nil:
-      let code = stopCopyRelay(relayProcess)
+    if pipeline != nil:
+      let stopped = pipeline.stop()
       if finalMessage.len == 0:
-        finalExitCode = code
-        finalMessage = &"in-process live worker stopped copy relay for /{state.cameraId}"
+        finalExitCode = stopped.exitCode
+        finalMessage = &"in-process live worker stopped pipeline for /{state.cameraId}"
+      pipeline = nil
 
     if finalMessage.len == 0:
       finalMessage = &"in-process live worker stopped for /{state.cameraId}"
@@ -234,13 +195,11 @@ proc startInProcessLiveWorker*(
   ): InProcessLiveWorker =
   ## Start the internal live worker thread.
   ##
-  ## This step connects a temporary ffmpeg copy relay inside the worker thread.
-  ## The external process is an implementation detail of this scaffold; the
-  ## session controller still treats this as the in-process worker path.
+  ## This step still uses the ffmpeg-copy live pipeline backend, but the worker
+  ## now talks to it through live_pipeline.nim.  The next media step can add a
+  ## second backend without changing live_session.nim.
   if ffmpegPath.len == 0:
     raise newException(IOError, "ffmpeg path is empty")
-  if ffmpegPath.contains("/") and not fileExists(ffmpegPath):
-    raise newException(IOError, &"ffmpeg not found: {ffmpegPath}")
 
   echo &"starting in-process live worker for {cameraId} ({cameraName}): {inputRtsp} -> {outputRtsp}"
 
