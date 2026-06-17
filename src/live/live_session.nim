@@ -327,10 +327,10 @@ proc startInProcessWorkerLocked(
     outputRtspUrl: outputRtsp,
     aiWebrtcPath: &"/{outputPath}",
     relayPid: 0,
-    relayCommand: "in-process",
-    relayArgs: @[inputRtsp, outputRtsp],
+    relayCommand: "in-process-ffmpeg-copy",
+    relayArgs: ffmpegCopyArgs(inputRtsp, outputRtsp),
     lastExitCode: 0,
-    message: &"starting in-process live worker: /{slot.mediamtxPath} -> /{outputPath}",
+    message: &"starting in-process live worker copy relay: /{slot.mediamtxPath} -> /{outputPath}",
     startedAt: utcStamp(),
     stoppedAt: ""
   )
@@ -340,11 +340,12 @@ proc startInProcessWorkerLocked(
       inputRtsp,
       outputRtsp,
       slot.id,
-      slot.name
+      slot.name,
+      controller.ffmpegPath
     )
     controller.state.status = "running"
     controller.state.running = true
-    controller.state.message = &"in-process live worker thread is running for /{slot.mediamtxPath}; media pipeline is not connected yet"
+    controller.state.message = &"in-process live worker is publishing /{slot.mediamtxPath} to /{outputPath} with ffmpeg copy relay; inference stage is not connected yet"
   except CatchableError as e:
     if controller.inProcessWorker != nil:
       controller.inProcessWorker.close()

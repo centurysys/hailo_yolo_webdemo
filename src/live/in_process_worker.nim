@@ -1,12 +1,15 @@
-## In-process live worker scaffold.
+## In-process live worker media-output scaffold.
 ##
-## This module provides the process-internal worker thread that will later own
-## the live RTSP decode -> HAILO infer -> overlay -> encode -> RTSP publish
-## pipeline.  This step intentionally keeps the worker as a lifecycle scaffold:
-## it starts a dedicated thread and stops it cleanly, but it does not connect the
-## media pipeline yet.
+## The compact demo now keeps live-session control inside the main
+## hailo_yolo_webdemo process.  This worker still uses ffmpeg as a temporary
+## copy-relay media backend, but the process is owned by the internal live
+## worker thread instead of by live_session.nim directly.
+##
+## Next steps can replace the ffmpeg copy relay in this module with the real
+## RTSP decode -> HAILO infer -> overlay -> encode -> RTSP publish pipeline
+## without changing the WebUI/session API contract again.
 
-import std/strformat
+import std/[os, osproc, strformat, strutils]
 
 import threadtools
 
@@ -21,6 +24,11 @@ type
 
   InProcessWorkerState = object
     queue: ThreadQueue[InProcessWorkerCommand]
+    ffmpegPath: string
+    inputRtsp: string
+    outputRtsp: string
+    cameraId: string
+    cameraName: string
 
   InProcessLiveWorker* = ref object
     queue: ThreadQueue[InProcessWorkerCommand]
@@ -29,9 +37,71 @@ type
     running: bool
     closed: bool
 
-proc inProcessWorkerMain(state: ptr InProcessWorkerState) {.thread.} =
-  echo "in-process live worker thread started"
+proc ffmpegCopyArgs(inputRtsp, outputRtsp: string): seq[string] =
+  @[
+    "-nostdin",
+    "-hide_banner",
+    "-loglevel", "warning",
+    "-rtsp_transport", "tcp",
+    "-fflags", "nobuffer",
+    "-flags", "low_delay",
+    "-i", inputRtsp,
+    "-an",
+    "-c:v", "copy",
+    "-rtsp_transport", "tcp",
+    "-f", "rtsp",
+    outputRtsp
+  ]
+
+proc startCopyRelay(state: InProcessWorkerState): Process =
+  if state.ffmpegPath.len == 0:
+    raise newException(IOError, "ffmpeg path is empty")
+  if state.ffmpegPath.contains("/") and not fileExists(state.ffmpegPath):
+    raise newException(IOError, &"ffmpeg not found: {state.ffmpegPath}")
+
+  let args = ffmpegCopyArgs(state.inputRtsp, state.outputRtsp)
+  echo "in-process live worker exec: ", state.ffmpegPath, " ", args.join(" ")
+  result = startProcess(
+    state.ffmpegPath,
+    args = args,
+    options = {poUsePath, poParentStreams}
+  )
+
+proc stopCopyRelay(process: var Process) =
+  if process.isNil:
+    return
+
   try:
+    if process.running():
+      process.terminate()
+      discard process.waitForExit()
+    else:
+      discard process.waitForExit()
+  except CatchableError:
+    try:
+      process.kill()
+      discard process.waitForExit()
+    except CatchableError:
+      discard
+
+  try:
+    process.close()
+  except CatchableError:
+    discard
+  process = nil
+
+proc inProcessWorkerMain(state: ptr InProcessWorkerState) {.thread.} =
+  echo &"in-process live worker thread started for {state.cameraId} ({state.cameraName})"
+
+  var relayProcess: Process = nil
+  try:
+    try:
+      relayProcess = startCopyRelay(state[])
+      echo &"in-process live worker publishing {state.inputRtsp} -> {state.outputRtsp}"
+    except CatchableError as e:
+      echo &"in-process live worker failed to start copy relay: {e.msg}"
+      return
+
     while true:
       var recvRes = state.queue.receiveResult()
       if recvRes.isErr:
@@ -42,22 +112,28 @@ proc inProcessWorkerMain(state: ptr InProcessWorkerState) {.thread.} =
       of iwcStop:
         break
   finally:
-    echo "in-process live worker thread stopped"
+    stopCopyRelay(relayProcess)
+    echo &"in-process live worker thread stopped for {state.cameraId}"
 
 proc startInProcessLiveWorker*(
     inputRtsp: string;
     outputRtsp: string;
     cameraId: string;
     cameraName: string;
+    ffmpegPath: string;
     queueSize = DefaultControlQueueSize
   ): InProcessLiveWorker =
   ## Start the internal live worker thread.
   ##
-  ## The arguments are kept in the public contract now even though this scaffold
-  ## does not use them inside the worker thread yet.  The real media pipeline can
-  ## be connected without changing live_session.nim again.
+  ## This step connects a temporary ffmpeg copy relay inside the worker thread.
+  ## The external process is an implementation detail of this scaffold; the
+  ## session controller still treats this as the in-process worker path.
   if queueSize <= 0:
     raise newException(ValueError, &"invalid in-process worker queue size: {queueSize}")
+  if ffmpegPath.len == 0:
+    raise newException(IOError, "ffmpeg path is empty")
+  if ffmpegPath.contains("/") and not fileExists(ffmpegPath):
+    raise newException(IOError, &"ffmpeg not found: {ffmpegPath}")
 
   let qRes = newThreadQueue[InProcessWorkerCommand](queueSize)
   if qRes.isErr:
@@ -68,6 +144,11 @@ proc startInProcessLiveWorker*(
   result = InProcessLiveWorker()
   result.queue = qRes.get()
   result.state.queue = result.queue
+  result.state.ffmpegPath = ffmpegPath
+  result.state.inputRtsp = inputRtsp
+  result.state.outputRtsp = outputRtsp
+  result.state.cameraId = cameraId
+  result.state.cameraName = cameraName
 
   createThread(result.thread, inProcessWorkerMain, addr result.state)
   result.running = true
