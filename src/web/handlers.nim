@@ -183,6 +183,51 @@ proc outputFilename(job: JobInfo): string =
   else:
     "output" & job.kind.extension
 
+proc liveSessionConflictMessage(): string {.gcsafe.} =
+  ## File upload jobs and live sessions both use the same HAILO device in the
+  ## compact demo.  Keep the policy simple: while the live session is running,
+  ## reject new file jobs instead of queueing work that cannot run safely.
+  let session = currentLiveSessionController()
+  if session == nil:
+    return ""
+
+  try:
+    let state = session.currentState()
+    if state.running:
+      let cam =
+        if state.selectedCameraName.len > 0: state.selectedCameraName
+        elif state.selectedCameraId.len > 0: state.selectedCameraId
+        else: "selected camera"
+      return &"live session is running for {cam}; stop Live preview before running file inference"
+  except CatchableError as e:
+    return &"failed to check live session state: {e.msg}"
+
+proc activeJobConflictMessage(store: JobStore): string {.gcsafe.} =
+  ## Starting the live session while a file job is queued/running would contend
+  ## for HAILO.  Reject live start until the current job finishes.
+  if store == nil:
+    return ""
+
+  let maybeJob = store.firstActiveJob()
+  if maybeJob.isNone:
+    return ""
+
+  let job = maybeJob.get
+  &"file inference job {job.id} is {job.status.toWire}; wait for it to finish before starting Live preview"
+
+proc cleanupNginxUploadTemp(request: Request) {.gcsafe.} =
+  ## If nginx has already stored the upload and passed it through X-FILE, do not
+  ## leave the temporary file behind when rejecting the request with 409.
+  let nginxFile = getHeader(request, "X-FILE")
+  if nginxFile.len == 0:
+    return
+
+  try:
+    if fileExists(nginxFile):
+      removeFile(nginxFile)
+  except CatchableError as e:
+    echo &"warning: failed to remove rejected upload temp file {nginxFile}: {e.msg}"
+
 proc handleIndex*(request: Request) {.gcsafe.} =
   request.respondHtml(200, renderIndexPage())
 
@@ -221,6 +266,12 @@ proc handleUpload*(request: Request) {.gcsafe.} =
   let store = currentStore()
   if store == nil:
     request.respondText(500, "job store is not initialized")
+    return
+
+  let liveConflict = liveSessionConflictMessage()
+  if liveConflict.len > 0:
+    request.cleanupNginxUploadTemp()
+    request.respondText(409, liveConflict)
     return
 
   try:
@@ -394,6 +445,13 @@ proc handleApiLiveSessionStart*(request: Request) {.gcsafe.} =
   if targetStore == nil:
     request.respondText(500, "live target store is not initialized")
     return
+
+  let jobStore = currentStore()
+  if jobStore != nil:
+    let jobConflict = activeJobConflictMessage(jobStore)
+    if jobConflict.len > 0:
+      request.respondText(409, jobConflict)
+      return
 
   try:
     request.respondJson(200, session.prepareSessionJson(cameraStore, targetStore))

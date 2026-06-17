@@ -25,7 +25,7 @@ const
   liveFfmpegPath* = "/usr/bin/ffmpeg"
   liveExternalWorkerPath* = "/usr/local/bin/hailo-live-worker"
   liveExternalWorkerArgs* = "--input {input} --output {output}"
-  liveSessionMode* = "mediamtx-proxy"
+  liveSessionMode* = "in-process"
 
   hefPath* = "/usr/local/share/hailo-demo/yolov11s.hef"
   fontPath* = "/usr/share/fonts/dejavu/DejaVuSans.ttf"
@@ -45,13 +45,15 @@ proc getLiveExternalWorkerArgs*(): string =
   result = getEnv("HAILO_DEMO_LIVE_WORKER_ARGS", liveExternalWorkerArgs)
 
 proc getLiveSessionMode*(): string =
-  ## mediamtx-proxy keeps the proven zero-process relay as the safe default.
-  ## Set HAILO_DEMO_LIVE_SESSION_MODE=ffmpeg-copy to exercise a long-running
-  ## RTSP read/publish relay process.
-  ## Set HAILO_DEMO_LIVE_SESSION_MODE=external-worker to launch a configurable
-  ## worker command with expanded input/output RTSP arguments.
-  ## Set HAILO_DEMO_LIVE_SESSION_MODE=in-process to exercise the internal live
-  ## worker thread scaffold that will later own the compact demo pipeline.
+  ## The compact demo keeps the live worker inside the main web demo process by
+  ## default, so the UI/API, file inference path, and live session controller can
+  ## coordinate one HAILO device without an extra service process.
+  ##
+  ## Other modes are intentionally kept for comparison and bring-up:
+  ##   mediamtx-proxy   MediaMTX path proxy only
+  ##   ffmpeg-copy      external ffmpeg copy relay
+  ##   external-worker  configurable worker command
+  ##   in-process       internal live worker thread
   result = getEnv("HAILO_DEMO_LIVE_SESSION_MODE", liveSessionMode)
 
 proc getListenHost*(): string =
