@@ -19,6 +19,7 @@ const
 
   stateRoot* = "/var/lib/hailo-demo"
   liveCameraConfigPath* = stateRoot & "/live-cameras.json"
+  liveTargetConfigPath* = stateRoot & "/live-target.json"
   mediamtxPathctlPath* = "/usr/local/sbin/mediamtx-pathctl"
 
   hefPath* = "/usr/local/share/hailo-demo/yolov11s.hef"

@@ -5,6 +5,7 @@ const selectedBadge = document.getElementById('selected-camera-badge');
 const selectedName = document.getElementById('selected-camera-name');
 const selectedWebrtcLink = document.getElementById('selected-webrtc-link');
 const aiWebrtcLink = document.getElementById('ai-webrtc-link');
+const aiPipelineStatus = document.getElementById('ai-pipeline-status');
 
 const dialog = document.getElementById('camera-dialog');
 const dialogTitle = document.getElementById('camera-dialog-title');
@@ -19,7 +20,14 @@ const cameraCancelButton = document.getElementById('camera-cancel');
 const cameraDialogCloseButton = document.getElementById('camera-dialog-close');
 
 let slots = [];
-let selectedCameraId = localStorage.getItem('hailo-live-selected-camera') || '';
+let liveTarget = {
+  selectedCameraId: '',
+  aiMediamtxPath: 'cam-ai',
+  aiWebrtcPath: '/cam-ai',
+  pipelineStatus: 'not-started',
+  running: false,
+  message: 'no camera selected',
+};
 
 function setMessage(text, isError = false) {
   liveMessage.textContent = text || '';
@@ -42,7 +50,7 @@ function hlsUrl(slot) {
 }
 
 function aiWebrtcUrl() {
-  return absoluteMediaUrl(8889, '/cam-ai');
+  return absoluteMediaUrl(8889, liveTarget.aiWebrtcPath || '/cam-ai');
 }
 
 function defaultSlotName(slotId) {
@@ -50,14 +58,20 @@ function defaultSlotName(slotId) {
   return n ? `Camera ${n}` : 'Camera';
 }
 
+function selectedCameraId() {
+  return liveTarget.selectedCameraId || '';
+}
+
 function findSlot(slotId) {
   return slots.find((slot) => slot.id === slotId) || null;
 }
 
 function updateSelectedPanel() {
-  const slot = findSlot(selectedCameraId);
-  aiWebrtcLink.href = aiWebrtcUrl();
-  aiWebrtcLink.textContent = aiWebrtcUrl();
+  const slot = findSlot(selectedCameraId());
+  const aiUrl = aiWebrtcUrl();
+  aiWebrtcLink.href = aiUrl;
+  aiWebrtcLink.textContent = aiUrl;
+  aiPipelineStatus.textContent = liveTarget.pipelineStatus || 'not-started';
 
   if (!slot || !slot.enabled || !slot.source) {
     selectedBadge.textContent = 'not selected';
@@ -77,7 +91,7 @@ function updateSelectedPanel() {
 
 function renderCameraCard(slot) {
   const configured = Boolean(slot.enabled && slot.source);
-  const selected = slot.id === selectedCameraId;
+  const selected = slot.id === selectedCameraId();
   const card = document.createElement('article');
   card.className = 'camera-card';
   card.classList.toggle('configured', configured);
@@ -93,7 +107,7 @@ function renderCameraCard(slot) {
 
   const badge = document.createElement('span');
   badge.className = 'status-pill';
-  badge.classList.toggle('active', configured);
+  badge.classList.toggle('active', configured || selected);
   badge.textContent = configured ? (selected ? 'AI target' : 'enabled') : 'not set';
   title.appendChild(badge);
   card.appendChild(title);
@@ -182,6 +196,12 @@ function renderCameraGrid() {
   updateSelectedPanel();
 }
 
+async function loadLiveTarget() {
+  const res = await fetch('/api/live/target', { cache: 'no-store' });
+  if (!res.ok) throw new Error(await res.text());
+  liveTarget = await res.json();
+}
+
 async function loadCameras() {
   setMessage('loading cameras...');
   try {
@@ -189,10 +209,7 @@ async function loadCameras() {
     if (!res.ok) throw new Error(await res.text());
     const data = await res.json();
     slots = Array.isArray(data.slots) ? data.slots : [];
-    if (selectedCameraId && !findSlot(selectedCameraId)) {
-      selectedCameraId = '';
-      localStorage.removeItem('hailo-live-selected-camera');
-    }
+    await loadLiveTarget();
     renderCameraGrid();
     setMessage('');
   } catch (err) {
@@ -257,10 +274,6 @@ async function deleteCamera() {
     setMessage(`deleting ${cameraId}...`);
     const res = await fetch('/api/live/cameras/' + encodeURIComponent(cameraId), { method: 'DELETE' });
     if (!res.ok) throw new Error(await res.text());
-    if (selectedCameraId === cameraId) {
-      selectedCameraId = '';
-      localStorage.removeItem('hailo-live-selected-camera');
-    }
     closeCameraDialog();
     await loadCameras();
     setMessage(`${cameraId} deleted`);
@@ -269,13 +282,20 @@ async function deleteCamera() {
   }
 }
 
-function selectCamera(cameraId) {
+async function selectCamera(cameraId) {
   const slot = findSlot(cameraId);
   if (!slot || !slot.enabled || !slot.source) return;
-  selectedCameraId = cameraId;
-  localStorage.setItem('hailo-live-selected-camera', cameraId);
-  renderCameraGrid();
-  setMessage(`${cameraId} selected as AI target`);
+
+  try {
+    setMessage(`selecting ${cameraId} as AI target...`);
+    const res = await fetch('/api/live/target/' + encodeURIComponent(cameraId), { method: 'PUT' });
+    if (!res.ok) throw new Error(await res.text());
+    liveTarget = await res.json();
+    renderCameraGrid();
+    setMessage(`${cameraId} selected as AI target`);
+  } catch (err) {
+    setMessage('error: ' + err.message, true);
+  }
 }
 
 refreshButton.addEventListener('click', loadCameras);

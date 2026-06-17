@@ -235,6 +235,17 @@ proc camerasJson*(store: LiveCameraStore): string {.gcsafe.} =
     withLock store.lock:
       result = pretty(slotsToJson(store.slots)) & "\n"
 
+proc getCameraSlot*(store: LiveCameraStore; id: string): CameraSlot {.gcsafe.} =
+  {.cast(gcsafe).}:
+    validateSlotId(id)
+    withLock store.lock:
+      result = store.slots.getOrDefault(id, defaultSlot(id))
+
+proc isCameraSelectable*(store: LiveCameraStore; id: string): bool {.gcsafe.} =
+  {.cast(gcsafe).}:
+    let slot = store.getCameraSlot(id)
+    result = slot.enabled and slot.source.len > 0
+
 proc operationJson(op: CameraOperationResult): string =
   var root = newJObject()
   root["slot"] = slotToJson(op.slot)

@@ -14,7 +14,7 @@ import std/[os, random]
 
 import config
 import jobs/[runner, store]
-import live/cameras
+import live/[cameras, live_target]
 import util/paths
 import web/server
 
@@ -29,6 +29,7 @@ when isMainModule:
 
   let jobStore = newJobStore()
   let cameraStore = newLiveCameraStore(liveCameraConfigPath, mediamtxPathctlPath)
+  let targetStore = newLiveTargetStore(liveTargetConfigPath)
   let syncResults = cameraStore.syncEnabledCameras()
   for item in syncResults:
     if item.mediamtx.ok:
@@ -43,10 +44,12 @@ when isMainModule:
   echo "jobsDir : ", jobsDir
   echo "hefPath : ", hefPath
   echo "cameraConfigPath: ", liveCameraConfigPath
+  echo "liveTargetConfigPath: ", liveTargetConfigPath
 
   try:
-    startServer(jobStore, cameraStore)
+    startServer(jobStore, cameraStore, targetStore)
   finally:
     jobRunner.close()
+    targetStore.close()
     cameraStore.close()
     jobStore.close()
