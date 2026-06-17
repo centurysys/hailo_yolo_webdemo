@@ -1,29 +1,34 @@
 ## In-process live worker media-output scaffold.
 ##
-## The compact demo now keeps live-session control inside the main
+## The compact demo keeps live-session control inside the main
 ## hailo_yolo_webdemo process.  This worker still uses ffmpeg as a temporary
 ## copy-relay media backend, but the process is owned by the internal live
 ## worker thread instead of by live_session.nim directly.
 ##
-## Next steps can replace the ffmpeg copy relay in this module with the real
-## RTSP decode -> HAILO infer -> overlay -> encode -> RTSP publish pipeline
-## without changing the WebUI/session API contract again.
+## This revision adds a small worker status snapshot so the session controller
+## can detect ffmpeg start, normal exit, and unexpected exit while the UI is
+## polling /api/live/session.
 
-import std/[os, osproc, strformat, strutils]
+import std/[locks, os, osproc, strformat, strutils]
 
-import threadtools
+const
+  DefaultPollIntervalMs = 200
 
-const DefaultControlQueueSize = 4
 
 type
-  InProcessWorkerCommandKind = enum
-    iwcStop
-
-  InProcessWorkerCommand = object
-    kind: InProcessWorkerCommandKind
+  InProcessWorkerSnapshot* = object
+    started*: bool
+    running*: bool
+    finished*: bool
+    stopRequested*: bool
+    relayPid*: int
+    exitCode*: int
+    message*: string
 
   InProcessWorkerState = object
-    queue: ThreadQueue[InProcessWorkerCommand]
+    lock: Lock
+    stopRequested: bool
+    snapshot: InProcessWorkerSnapshot
     ffmpegPath: string
     inputRtsp: string
     outputRtsp: string
@@ -31,11 +36,11 @@ type
     cameraName: string
 
   InProcessLiveWorker* = ref object
-    queue: ThreadQueue[InProcessWorkerCommand]
     thread: Thread[ptr InProcessWorkerState]
     state: InProcessWorkerState
-    running: bool
+    joined: bool
     closed: bool
+
 
 proc ffmpegCopyArgs(inputRtsp, outputRtsp: string): seq[string] =
   @[
@@ -53,7 +58,40 @@ proc ffmpegCopyArgs(inputRtsp, outputRtsp: string): seq[string] =
     outputRtsp
   ]
 
-proc startCopyRelay(state: InProcessWorkerState): Process =
+proc setWorkerSnapshot(
+    state: ptr InProcessWorkerState;
+    started, running, finished: bool;
+    relayPid, exitCode: int;
+    message: string
+  ) =
+  withLock state.lock:
+    state.snapshot.started = started
+    state.snapshot.running = running
+    state.snapshot.finished = finished
+    state.snapshot.stopRequested = state.stopRequested
+    state.snapshot.relayPid = relayPid
+    state.snapshot.exitCode = exitCode
+    state.snapshot.message = message
+
+proc setWorkerMessage(state: ptr InProcessWorkerState; message: string) =
+  withLock state.lock:
+    state.snapshot.stopRequested = state.stopRequested
+    state.snapshot.message = message
+
+proc workerStopRequested(state: ptr InProcessWorkerState): bool =
+  withLock state.lock:
+    result = state.stopRequested
+
+proc requestStop(worker: InProcessLiveWorker) =
+  if worker.isNil or worker.closed:
+    return
+  withLock worker.state.lock:
+    worker.state.stopRequested = true
+    worker.state.snapshot.stopRequested = true
+    if worker.state.snapshot.running:
+      worker.state.snapshot.message = &"stop requested for in-process live worker on /{worker.state.cameraId}"
+
+proc startCopyRelay(state: ptr InProcessWorkerState): Process =
   if state.ffmpegPath.len == 0:
     raise newException(IOError, "ffmpeg path is empty")
   if state.ffmpegPath.contains("/") and not fileExists(state.ffmpegPath):
@@ -67,22 +105,23 @@ proc startCopyRelay(state: InProcessWorkerState): Process =
     options = {poUsePath, poParentStreams}
   )
 
-proc stopCopyRelay(process: var Process) =
+proc stopCopyRelay(process: var Process): int =
+  result = 0
   if process.isNil:
     return
 
   try:
     if process.running():
       process.terminate()
-      discard process.waitForExit()
+      result = process.waitForExit()
     else:
-      discard process.waitForExit()
+      result = process.waitForExit()
   except CatchableError:
     try:
       process.kill()
-      discard process.waitForExit()
+      result = process.waitForExit()
     except CatchableError:
-      discard
+      result = -1
 
   try:
     process.close()
@@ -94,83 +133,168 @@ proc inProcessWorkerMain(state: ptr InProcessWorkerState) {.thread.} =
   echo &"in-process live worker thread started for {state.cameraId} ({state.cameraName})"
 
   var relayProcess: Process = nil
+  var relayPid = 0
+  var finalExitCode = 0
+  var finalMessage = ""
+
+  setWorkerSnapshot(
+    state,
+    started = true,
+    running = false,
+    finished = false,
+    relayPid = 0,
+    exitCode = 0,
+    message = &"in-process live worker is starting ffmpeg copy relay for /{state.cameraId}"
+  )
+
   try:
     try:
-      relayProcess = startCopyRelay(state[])
-      echo &"in-process live worker publishing {state.inputRtsp} -> {state.outputRtsp}"
+      relayProcess = startCopyRelay(state)
+      relayPid = relayProcess.processID()
+      finalMessage = &"in-process live worker is publishing {state.inputRtsp} -> {state.outputRtsp}"
+      setWorkerSnapshot(
+        state,
+        started = true,
+        running = true,
+        finished = false,
+        relayPid = relayPid,
+        exitCode = 0,
+        message = finalMessage
+      )
+      echo finalMessage
     except CatchableError as e:
-      echo &"in-process live worker failed to start copy relay: {e.msg}"
+      finalExitCode = -1
+      finalMessage = &"in-process live worker failed to start copy relay: {e.msg}"
+      echo finalMessage
+      setWorkerSnapshot(
+        state,
+        started = true,
+        running = false,
+        finished = true,
+        relayPid = 0,
+        exitCode = finalExitCode,
+        message = finalMessage
+      )
       return
 
     while true:
-      var recvRes = state.queue.receiveResult()
-      if recvRes.isErr:
+      if workerStopRequested(state):
+        setWorkerMessage(state, &"stopping in-process live worker copy relay for /{state.cameraId}")
+        finalExitCode = stopCopyRelay(relayProcess)
+        finalMessage = &"in-process live worker stopped copy relay for /{state.cameraId}"
         break
 
-      var cmd = recvRes.take()
-      case cmd.kind
-      of iwcStop:
+      if relayProcess.isNil:
+        finalExitCode = -1
+        finalMessage = "in-process live worker copy relay disappeared"
         break
+
+      if not relayProcess.running():
+        finalExitCode = relayProcess.waitForExit()
+        try:
+          relayProcess.close()
+        except CatchableError:
+          discard
+        relayProcess = nil
+        if finalExitCode == 0:
+          finalMessage = &"in-process live worker copy relay exited for /{state.cameraId}"
+        else:
+          finalMessage = &"in-process live worker copy relay exited with code {finalExitCode} for /{state.cameraId}"
+        break
+
+      sleep(DefaultPollIntervalMs)
+
   finally:
-    stopCopyRelay(relayProcess)
-    echo &"in-process live worker thread stopped for {state.cameraId}"
+    if relayProcess != nil:
+      let code = stopCopyRelay(relayProcess)
+      if finalMessage.len == 0:
+        finalExitCode = code
+        finalMessage = &"in-process live worker stopped copy relay for /{state.cameraId}"
+
+    if finalMessage.len == 0:
+      finalMessage = &"in-process live worker stopped for /{state.cameraId}"
+
+    setWorkerSnapshot(
+      state,
+      started = true,
+      running = false,
+      finished = true,
+      relayPid = relayPid,
+      exitCode = finalExitCode,
+      message = finalMessage
+    )
+    echo &"in-process live worker thread stopped for {state.cameraId}: {finalMessage}"
 
 proc startInProcessLiveWorker*(
     inputRtsp: string;
     outputRtsp: string;
     cameraId: string;
     cameraName: string;
-    ffmpegPath: string;
-    queueSize = DefaultControlQueueSize
+    ffmpegPath: string
   ): InProcessLiveWorker =
   ## Start the internal live worker thread.
   ##
   ## This step connects a temporary ffmpeg copy relay inside the worker thread.
   ## The external process is an implementation detail of this scaffold; the
   ## session controller still treats this as the in-process worker path.
-  if queueSize <= 0:
-    raise newException(ValueError, &"invalid in-process worker queue size: {queueSize}")
   if ffmpegPath.len == 0:
     raise newException(IOError, "ffmpeg path is empty")
   if ffmpegPath.contains("/") and not fileExists(ffmpegPath):
     raise newException(IOError, &"ffmpeg not found: {ffmpegPath}")
 
-  let qRes = newThreadQueue[InProcessWorkerCommand](queueSize)
-  if qRes.isErr:
-    raise newException(IOError, &"failed to create in-process worker queue: {qRes.error}")
-
   echo &"starting in-process live worker for {cameraId} ({cameraName}): {inputRtsp} -> {outputRtsp}"
 
   result = InProcessLiveWorker()
-  result.queue = qRes.get()
-  result.state.queue = result.queue
+  initLock(result.state.lock)
+  result.state.stopRequested = false
+  result.state.snapshot = InProcessWorkerSnapshot(
+    started: false,
+    running: false,
+    finished: false,
+    stopRequested: false,
+    relayPid: 0,
+    exitCode: 0,
+    message: &"in-process live worker has not started yet for /{cameraId}"
+  )
   result.state.ffmpegPath = ffmpegPath
   result.state.inputRtsp = inputRtsp
   result.state.outputRtsp = outputRtsp
   result.state.cameraId = cameraId
   result.state.cameraName = cameraName
+  result.joined = false
+  result.closed = false
 
   createThread(result.thread, inProcessWorkerMain, addr result.state)
-  result.running = true
+
+proc snapshot*(worker: InProcessLiveWorker): InProcessWorkerSnapshot {.gcsafe.} =
+  if worker.isNil:
+    return InProcessWorkerSnapshot(
+      started: false,
+      running: false,
+      finished: true,
+      stopRequested: false,
+      relayPid: 0,
+      exitCode: 0,
+      message: "in-process live worker is not running"
+    )
+
+  {.cast(gcsafe).}:
+    withLock worker.state.lock:
+      result = worker.state.snapshot
+      result.stopRequested = worker.state.stopRequested
 
 proc isRunning*(worker: InProcessLiveWorker): bool {.gcsafe.} =
-  result = worker != nil and worker.running and not worker.closed
+  let snap = worker.snapshot()
+  result = worker != nil and snap.running and not snap.finished and not worker.closed
 
 proc close*(worker: InProcessLiveWorker) =
   if worker.isNil or worker.closed:
     return
 
-  if worker.running and not worker.queue.isNil:
-    var req = InProcessWorkerCommand(kind: iwcStop)
-    let sendRes = worker.queue.sendMove(req)
-    if sendRes.isErr:
-      worker.queue.close()
+  worker.requestStop()
 
+  if not worker.joined:
     joinThread(worker.thread)
-    worker.running = false
-
-  if not worker.queue.isNil:
-    worker.queue.close()
-    worker.queue = nil
+    worker.joined = true
 
   worker.closed = true

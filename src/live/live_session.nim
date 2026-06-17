@@ -1,10 +1,9 @@
 ## Live inference session control.
 ##
-## This step keeps the existing MediaMTX proxy relay mode and ffmpeg copy-relay
-## mode, external-worker mode, and in-process mode.  The in-process mode starts
-## a dedicated worker thread inside hailo_yolo_webdemo.  This is the preferred
-## direction for the compact demo build; the media pipeline is connected in a
-## later step.
+## This step keeps the existing MediaMTX proxy relay mode, ffmpeg copy-relay
+## mode, external-worker mode, and in-process mode.  The in-process worker now
+## exposes a small status snapshot so the session controller can report ffmpeg
+## PID, exit code, and unexpected relay exit while /api/live/session is polled.
 
 import std/[json, locks, os, osproc, streams, strformat, strutils, times]
 
@@ -203,6 +202,27 @@ proc refreshProcessStateLocked(controller: LiveSessionController) =
     controller.state.message = &"{controller.state.mode} process exited with code {code}"
     controller.state.stoppedAt = utcStamp()
 
+proc refreshInProcessStateLocked(controller: LiveSessionController) =
+  if controller.inProcessWorker.isNil:
+    return
+  if controller.state.mode != "in-process":
+    return
+
+  let snap = controller.inProcessWorker.snapshot()
+  controller.state.relayPid = snap.relayPid
+  controller.state.lastExitCode = snap.exitCode
+  if snap.message.len > 0:
+    controller.state.message = snap.message
+
+  if controller.state.running and snap.finished:
+    controller.state.running = false
+    controller.state.status = if snap.exitCode == 0: "stopped" else: "error"
+    controller.state.stoppedAt = utcStamp()
+
+proc refreshLiveStateLocked(controller: LiveSessionController) =
+  controller.refreshProcessStateLocked()
+  controller.refreshInProcessStateLocked()
+
 proc runPathctl(controller: LiveSessionController; args: seq[string]): PathctlResult =
   if not fileExists(controller.pathctlPath):
     return PathctlResult(
@@ -343,9 +363,12 @@ proc startInProcessWorkerLocked(
       slot.name,
       controller.ffmpegPath
     )
+    let snap = controller.inProcessWorker.snapshot()
+    controller.state.relayPid = snap.relayPid
+    controller.state.lastExitCode = snap.exitCode
     controller.state.status = "running"
     controller.state.running = true
-    controller.state.message = &"in-process live worker is publishing /{slot.mediamtxPath} to /{outputPath} with ffmpeg copy relay; inference stage is not connected yet"
+    controller.state.message = &"in-process live worker is starting /{slot.mediamtxPath} -> /{outputPath} with ffmpeg copy relay; inference stage is not connected yet"
   except CatchableError as e:
     if controller.inProcessWorker != nil:
       controller.inProcessWorker.close()
@@ -489,13 +512,13 @@ proc newLiveSessionController*(
 proc sessionJson*(controller: LiveSessionController): string {.gcsafe.} =
   {.cast(gcsafe).}:
     withLock controller.lock:
-      controller.refreshProcessStateLocked()
+      controller.refreshLiveStateLocked()
       result = pretty(sessionToJson(controller.state)) & "\n"
 
 proc currentState*(controller: LiveSessionController): LiveSessionState {.gcsafe.} =
   {.cast(gcsafe).}:
     withLock controller.lock:
-      controller.refreshProcessStateLocked()
+      controller.refreshLiveStateLocked()
       result = controller.state
 
 proc stopInProcessWorkerLocked(controller: LiveSessionController) =
@@ -555,7 +578,7 @@ proc startSession*(
     let outputRtsp = mediaPathUrl(controller.rtspBaseUrl, outputPath)
 
     withLock controller.lock:
-      controller.refreshProcessStateLocked()
+      controller.refreshLiveStateLocked()
       controller.stopProcessLocked()
       controller.stopInProcessWorkerLocked()
       discard controller.deleteOutputPath(outputPath)
