@@ -16,6 +16,7 @@ proc startServer*(jobStore: JobStore; cameraStore: LiveCameraStore) =
 
   var router: Router
   router.get("/", handleIndex)
+  router.get("/live", handleLive)
   router.put("/upload", handleUpload)
   router.get("/wait/*", handleWait)
   router.get("/api/jobs/*", handleApiJob)
@@ -27,6 +28,7 @@ proc startServer*(jobStore: JobStore; cameraStore: LiveCameraStore) =
   router.get("/files/*", handleFile)
   router.get("/static/demo.css", handleDemoCss)
   router.get("/static/index.js", handleIndexJs)
+  router.get("/static/live.js", handleLiveJs)
   router.get("/static/wait.js", handleWaitJs)
   router.get("/static/result-viewer.js", handleResultViewerJs)
   router.get("/static/pico.min.css", handleMissingPico)

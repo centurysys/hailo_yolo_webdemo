@@ -119,3 +119,219 @@ button.secondary {
   .seek-control { flex-basis: 100%; order: 2; }
   .time-readout { min-width: 0; text-align: left; }
 }
+
+/* Live camera preview page */
+.top-nav {
+  display: flex;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+  margin-top: 0.9rem;
+}
+.top-nav a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2rem;
+  padding: 0.35rem 0.7rem;
+  border: 1px solid color-mix(in srgb, CanvasText 18%, Canvas);
+  border-radius: 999px;
+  text-decoration: none;
+}
+.live-page {
+  width: min(96vw, 1500px);
+  margin-left: 50%;
+  transform: translateX(-50%);
+}
+.live-page-header,
+.panel-heading,
+.camera-card-title,
+.camera-actions,
+.preview-links,
+.dialog-actions,
+.dialog-header {
+  display: flex;
+  gap: 0.75rem;
+  align-items: center;
+  flex-wrap: wrap;
+}
+.live-page-header,
+.panel-heading,
+.dialog-header {
+  justify-content: space-between;
+}
+.live-page-header h2,
+.panel-heading h3,
+.dialog-header h3 {
+  margin: 0;
+}
+.live-message {
+  min-height: 1.5rem;
+  margin: 0.75rem 0;
+}
+.live-layout {
+  display: grid;
+  grid-template-columns: minmax(30rem, 1.12fr) minmax(24rem, 0.88fr);
+  gap: 1rem;
+  align-items: start;
+}
+.raw-preview-panel,
+.ai-preview-panel {
+  border: 1px solid #d0d7de;
+  border-radius: 0.75rem;
+  padding: 1rem;
+  background: color-mix(in srgb, CanvasText 2%, Canvas);
+}
+.camera-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.85rem;
+  margin-top: 0.85rem;
+}
+.camera-card {
+  margin: 0;
+  min-width: 0;
+  border-color: color-mix(in srgb, CanvasText 16%, Canvas);
+  background: color-mix(in srgb, CanvasText 3%, Canvas);
+}
+.camera-card.selected {
+  border-color: #0969da;
+  box-shadow: 0 0 0 2px color-mix(in srgb, #0969da 30%, transparent);
+}
+.camera-card-title {
+  justify-content: space-between;
+  margin-bottom: 0.65rem;
+}
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  min-height: 1.45rem;
+  padding: 0.15rem 0.5rem;
+  border-radius: 999px;
+  font-size: 0.78rem;
+  line-height: 1;
+  border: 1px solid color-mix(in srgb, CanvasText 18%, Canvas);
+  background: color-mix(in srgb, CanvasText 5%, Canvas);
+  white-space: nowrap;
+}
+.status-pill.active {
+  border-color: #0969da;
+  background: color-mix(in srgb, #0969da 14%, Canvas);
+}
+.camera-preview-box,
+.ai-preview-box {
+  aspect-ratio: 16 / 9;
+  border: 1px solid color-mix(in srgb, CanvasText 16%, Canvas);
+  border-radius: 0.65rem;
+  background: color-mix(in srgb, CanvasText 6%, Canvas);
+  display: grid;
+  place-items: center;
+  overflow: hidden;
+}
+.camera-preview-box {
+  margin-bottom: 0.75rem;
+}
+.add-camera-button {
+  width: 4rem;
+  height: 4rem;
+  border-radius: 50%;
+  font-size: 2.2rem;
+  line-height: 1;
+  padding: 0;
+}
+.preview-placeholder,
+.ai-preview-placeholder {
+  display: grid;
+  gap: 0.45rem;
+  padding: 0.75rem;
+  text-align: center;
+  max-width: 100%;
+}
+.one-line {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
+.preview-links {
+  justify-content: center;
+  gap: 0.8rem;
+  font-size: 0.9rem;
+}
+.camera-actions {
+  justify-content: flex-end;
+}
+.camera-actions button,
+.dialog-actions button {
+  margin: 0;
+}
+.ai-preview-panel {
+  position: sticky;
+  top: 1rem;
+}
+.ai-preview-box {
+  margin: 0.85rem 0;
+}
+.live-status-list {
+  display: grid;
+  gap: 0.7rem;
+  margin: 0;
+}
+.live-status-list > div {
+  display: grid;
+  grid-template-columns: 9rem minmax(0, 1fr);
+  gap: 0.75rem;
+  align-items: start;
+}
+.live-status-list dt {
+  opacity: 0.72;
+}
+.live-status-list dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.camera-dialog {
+  width: min(92vw, 42rem);
+  border: 1px solid #d0d7de;
+  border-radius: 0.75rem;
+  padding: 0;
+}
+.camera-dialog::backdrop {
+  background: rgb(0 0 0 / 0.45);
+}
+.camera-dialog form {
+  display: grid;
+  gap: 0.85rem;
+  padding: 1rem;
+}
+.camera-dialog label:not(.checkbox-control) {
+  display: grid;
+  gap: 0.35rem;
+  margin: 0;
+}
+.camera-dialog input[type="text"],
+.camera-dialog select {
+  width: 100%;
+  box-sizing: border-box;
+}
+.icon-button {
+  min-width: 2.2rem;
+  padding: 0.3rem 0.6rem;
+}
+.dialog-checkbox {
+  justify-content: flex-start;
+}
+button.danger {
+  border-color: #cf222e;
+  background: #cf222e;
+  color: white;
+}
+@media (max-width: 1080px) {
+  .live-layout { grid-template-columns: 1fr; }
+  .ai-preview-panel { position: static; }
+}
+@media (max-width: 640px) {
+  .live-page { width: 100%; margin-left: 0; transform: none; }
+  .camera-grid { grid-template-columns: 1fr; }
+  .live-status-list > div { grid-template-columns: 1fr; gap: 0.2rem; }
+  .live-page-header, .panel-heading { align-items: flex-start; }
+}

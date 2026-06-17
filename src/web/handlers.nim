@@ -168,6 +168,9 @@ proc outputFilename(job: JobInfo): string =
 proc handleIndex*(request: Request) {.gcsafe.} =
   request.respondHtml(200, renderIndexPage())
 
+proc handleLive*(request: Request) {.gcsafe.} =
+  request.respondHtml(200, renderLivePage())
+
 proc respondAsset(request: Request; contentType, body: string) {.gcsafe.} =
   var headers: HttpHeaders
   headers["Content-Type"] = contentType
@@ -179,6 +182,9 @@ proc handleDemoCss*(request: Request) {.gcsafe.} =
 
 proc handleIndexJs*(request: Request) {.gcsafe.} =
   request.respondAsset("application/javascript; charset=utf-8", indexJs())
+
+proc handleLiveJs*(request: Request) {.gcsafe.} =
+  request.respondAsset("application/javascript; charset=utf-8", liveJs())
 
 proc handleWaitJs*(request: Request) {.gcsafe.} =
   request.respondAsset("application/javascript; charset=utf-8", waitJs())
