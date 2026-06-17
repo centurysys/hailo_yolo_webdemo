@@ -23,6 +23,8 @@ const
   mediamtxPathctlPath* = "/usr/local/sbin/mediamtx-pathctl"
   liveRtspBaseUrl* = "rtsp://127.0.0.1:8554"
   liveFfmpegPath* = "/usr/bin/ffmpeg"
+  liveExternalWorkerPath* = "/usr/local/bin/hailo-live-worker"
+  liveExternalWorkerArgs* = "--input {input} --output {output}"
   liveSessionMode* = "mediamtx-proxy"
 
   hefPath* = "/usr/local/share/hailo-demo/yolov11s.hef"
@@ -36,10 +38,18 @@ proc getMediamtxPathctlPath*(): string =
 proc getLiveFfmpegPath*(): string =
   result = getEnv("HAILO_DEMO_LIVE_FFMPEG", liveFfmpegPath)
 
+proc getLiveExternalWorkerPath*(): string =
+  result = getEnv("HAILO_DEMO_LIVE_WORKER", liveExternalWorkerPath)
+
+proc getLiveExternalWorkerArgs*(): string =
+  result = getEnv("HAILO_DEMO_LIVE_WORKER_ARGS", liveExternalWorkerArgs)
+
 proc getLiveSessionMode*(): string =
   ## mediamtx-proxy keeps the proven zero-process relay as the safe default.
   ## Set HAILO_DEMO_LIVE_SESSION_MODE=ffmpeg-copy to exercise a long-running
   ## RTSP read/publish relay process before wiring in the real inference worker.
+  ## Set HAILO_DEMO_LIVE_SESSION_MODE=external-worker to launch a configurable
+  ## worker command with expanded input/output RTSP arguments.
   result = getEnv("HAILO_DEMO_LIVE_SESSION_MODE", liveSessionMode)
 
 proc getListenHost*(): string =

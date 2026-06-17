@@ -1,11 +1,11 @@
 ## Live inference session control.
 ##
-## This step keeps the existing MediaMTX proxy relay mode, and adds an optional
-## ffmpeg copy-relay mode.  The ffmpeg mode does not run inference yet, but it
-## exercises a long-running process that reads the selected MediaMTX RTSP path
-## and publishes /cam-ai.  This is a closer control-shape match to the upcoming
-## in-process decode/infer/overlay/encode pipeline, while still leaving the
-## proven MediaMTX proxy mode available as the safe default.
+## This step keeps the existing MediaMTX proxy relay mode and ffmpeg copy-relay
+## mode, and adds an external-worker mode.  The external-worker mode launches a
+## configurable long-running process with expanded input/output RTSP arguments.
+## This lets the real live inference worker be developed as a separate binary
+## while the web UI, start/stop lifecycle, and /cam-ai preview route remain
+## unchanged.
 
 import std/[json, locks, os, osproc, streams, strformat, strutils, times]
 
@@ -16,6 +16,8 @@ const
   defaultRtspBaseUrl* = "rtsp://127.0.0.1:8554"
   defaultPathctlPath* = "/usr/local/sbin/mediamtx-pathctl"
   defaultFfmpegPath* = "/usr/bin/ffmpeg"
+  defaultExternalWorkerPath* = "/usr/local/bin/hailo-live-worker"
+  defaultExternalWorkerArgs* = "--input {input} --output {output}"
   defaultSessionMode* = "mediamtx-proxy"
 
 type
@@ -48,6 +50,8 @@ type
     rtspBaseUrl: string
     pathctlPath: string
     ffmpegPath: string
+    externalWorkerPath: string
+    externalWorkerArgsTemplate: string
     sessionMode: string
     relayProcess: Process
     state: LiveSessionState
@@ -72,6 +76,45 @@ proc sanitizeExecutablePath(value, defaultValue: string): string =
   if result.len == 0:
     result = defaultValue
 
+proc sanitizeArgTemplate(value, defaultValue: string): string =
+  result = value.strip()
+  if result.len == 0:
+    result = defaultValue
+
+proc splitArgsTemplate(argsTemplate: string): seq[string] =
+  ## Keep this intentionally simple.  Current RTSP URLs and paths do not contain
+  ## whitespace, and avoiding shell parsing keeps the service behavior explicit.
+  ## If a future worker needs complex quoting, add a small argv file or JSON
+  ## config instead of routing through /bin/sh.
+  for part in argsTemplate.splitWhitespace():
+    if part.len > 0:
+      result.add(part)
+
+proc expandWorkerArg(
+    value: string;
+    inputRtsp, outputRtsp: string;
+    slot: CameraSlot;
+    outputPath: string
+  ): string =
+  result = value
+  result = result.replace("{input}", inputRtsp)
+  result = result.replace("{inputRtsp}", inputRtsp)
+  result = result.replace("{output}", outputRtsp)
+  result = result.replace("{outputRtsp}", outputRtsp)
+  result = result.replace("{cameraId}", slot.id)
+  result = result.replace("{cameraName}", slot.name)
+  result = result.replace("{inputPath}", slot.mediamtxPath)
+  result = result.replace("{outputPath}", outputPath)
+
+proc expandWorkerArgs(
+    argsTemplate: string;
+    inputRtsp, outputRtsp: string;
+    slot: CameraSlot;
+    outputPath: string
+  ): seq[string] =
+  for part in splitArgsTemplate(argsTemplate):
+    result.add(expandWorkerArg(part, inputRtsp, outputRtsp, slot, outputPath))
+
 proc normalizeSessionMode(value: string): string =
   let mode = value.strip().toLowerAscii()
   case mode
@@ -79,6 +122,8 @@ proc normalizeSessionMode(value: string): string =
     result = "mediamtx-proxy"
   of "ffmpeg", "ffmpeg-copy", "copy":
     result = "ffmpeg-copy"
+  of "external", "external-worker", "worker", "live-worker":
+    result = "external-worker"
   else:
     raise newException(ValueError, &"invalid live session mode: {value}")
 
@@ -143,7 +188,7 @@ proc markStoppedLocked(controller: LiveSessionController; message: string; statu
 proc refreshProcessStateLocked(controller: LiveSessionController) =
   if controller.relayProcess.isNil:
     return
-  if controller.state.mode != "ffmpeg-copy":
+  if not (controller.state.mode in ["ffmpeg-copy", "external-worker"]):
     return
   if controller.state.running and not controller.relayProcess.running():
     let code = controller.relayProcess.waitForExit()
@@ -152,7 +197,7 @@ proc refreshProcessStateLocked(controller: LiveSessionController) =
     controller.state.lastExitCode = code
     controller.state.status = "error"
     controller.state.running = false
-    controller.state.message = &"ffmpeg copy relay exited with code {code}"
+    controller.state.message = &"{controller.state.mode} process exited with code {code}"
     controller.state.stoppedAt = utcStamp()
 
 proc runPathctl(controller: LiveSessionController; args: seq[string]): PathctlResult =
@@ -259,6 +304,66 @@ proc startFfmpegCopyRelayLocked(
     controller.state.message = &"failed to start ffmpeg copy relay: {e.msg}"
     controller.state.stoppedAt = utcStamp()
 
+
+proc startExternalWorkerLocked(
+    controller: LiveSessionController;
+    slot: CameraSlot;
+    inputRtsp, outputPath, outputRtsp: string
+  ) =
+  if controller.externalWorkerPath.len == 0:
+    raise newException(IOError, "external live worker path is empty")
+  if controller.externalWorkerPath.contains("/") and not fileExists(controller.externalWorkerPath):
+    raise newException(IOError, &"external live worker not found: {controller.externalWorkerPath}")
+
+  discard controller.deleteOutputPath(outputPath)
+
+  let args = expandWorkerArgs(
+    controller.externalWorkerArgsTemplate,
+    inputRtsp,
+    outputRtsp,
+    slot,
+    outputPath
+  )
+  controller.state = LiveSessionState(
+    status: "starting",
+    running: false,
+    mode: "external-worker",
+    selectedCameraId: slot.id,
+    selectedCameraName: slot.name,
+    inputMediamtxPath: slot.mediamtxPath,
+    inputRtspUrl: inputRtsp,
+    outputMediamtxPath: outputPath,
+    outputRtspUrl: outputRtsp,
+    aiWebrtcPath: &"/{outputPath}",
+    relayPid: 0,
+    relayCommand: controller.externalWorkerPath,
+    relayArgs: args,
+    lastExitCode: 0,
+    message: &"starting external live worker: /{slot.mediamtxPath} -> /{outputPath}",
+    startedAt: utcStamp(),
+    stoppedAt: ""
+  )
+
+  try:
+    controller.relayProcess = startProcess(
+      controller.externalWorkerPath,
+      args = args,
+      options = {poUsePath, poParentStreams}
+    )
+    controller.state.relayPid = controller.relayProcess.processID()
+    controller.state.status = "running"
+    controller.state.running = true
+    controller.state.message = &"external live worker is publishing /{slot.mediamtxPath} to /{outputPath}"
+  except CatchableError as e:
+    if controller.relayProcess != nil:
+      controller.relayProcess.close()
+      controller.relayProcess = nil
+    controller.state.status = "error"
+    controller.state.running = false
+    controller.state.lastExitCode = -1
+    controller.state.message = &"failed to start external live worker: {e.msg}"
+    controller.state.stoppedAt = utcStamp()
+
 proc startMediamtxProxyRelayLocked(
     controller: LiveSessionController;
     slot: CameraSlot;
@@ -313,6 +418,8 @@ proc newLiveSessionController*(
     rtspBaseUrl = defaultRtspBaseUrl;
     pathctlPath = defaultPathctlPath;
     ffmpegPath = defaultFfmpegPath;
+    externalWorkerPath = defaultExternalWorkerPath;
+    externalWorkerArgsTemplate = defaultExternalWorkerArgs;
     sessionMode = defaultSessionMode
   ): LiveSessionController =
   new(result)
@@ -320,6 +427,8 @@ proc newLiveSessionController*(
   result.rtspBaseUrl = normalizeBaseUrl(rtspBaseUrl)
   result.pathctlPath = sanitizeExecutablePath(pathctlPath, defaultPathctlPath)
   result.ffmpegPath = sanitizeExecutablePath(ffmpegPath, defaultFfmpegPath)
+  result.externalWorkerPath = sanitizeExecutablePath(externalWorkerPath, defaultExternalWorkerPath)
+  result.externalWorkerArgsTemplate = sanitizeArgTemplate(externalWorkerArgsTemplate, defaultExternalWorkerArgs)
   result.sessionMode = normalizeSessionMode(sessionMode)
   result.relayProcess = nil
   result.state = defaultState(result.rtspBaseUrl)
@@ -390,6 +499,8 @@ proc startSession*(
       case controller.sessionMode
       of "ffmpeg-copy":
         controller.startFfmpegCopyRelayLocked(slot, inputRtsp, outputPath, outputRtsp)
+      of "external-worker":
+        controller.startExternalWorkerLocked(slot, inputRtsp, outputPath, outputRtsp)
       else:
         controller.startMediamtxProxyRelayLocked(slot, inputRtsp, outputPath, outputRtsp)
 

@@ -35,6 +35,8 @@ when isMainModule:
     liveRtspBaseUrl,
     pathctlPath,
     getLiveFfmpegPath(),
+    getLiveExternalWorkerPath(),
+    getLiveExternalWorkerArgs(),
     getLiveSessionMode()
   )
   let syncResults = cameraStore.syncEnabledCameras()
@@ -55,6 +57,8 @@ when isMainModule:
   echo "liveRtspBaseUrl: ", liveRtspBaseUrl
   echo "liveSessionMode: ", getLiveSessionMode()
   echo "liveFfmpeg: ", getLiveFfmpegPath()
+  echo "liveExternalWorker: ", getLiveExternalWorkerPath()
+  echo "liveExternalWorkerArgs: ", getLiveExternalWorkerArgs()
   echo "mediamtxPathctl: ", pathctlPath
 
   try:
