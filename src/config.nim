@@ -47,9 +47,11 @@ proc getLiveExternalWorkerArgs*(): string =
 proc getLiveSessionMode*(): string =
   ## mediamtx-proxy keeps the proven zero-process relay as the safe default.
   ## Set HAILO_DEMO_LIVE_SESSION_MODE=ffmpeg-copy to exercise a long-running
-  ## RTSP read/publish relay process before wiring in the real inference worker.
+  ## RTSP read/publish relay process.
   ## Set HAILO_DEMO_LIVE_SESSION_MODE=external-worker to launch a configurable
   ## worker command with expanded input/output RTSP arguments.
+  ## Set HAILO_DEMO_LIVE_SESSION_MODE=in-process to exercise the internal live
+  ## worker thread scaffold that will later own the compact demo pipeline.
   result = getEnv("HAILO_DEMO_LIVE_SESSION_MODE", liveSessionMode)
 
 proc getListenHost*(): string =

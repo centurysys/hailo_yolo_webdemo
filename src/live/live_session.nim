@@ -1,16 +1,16 @@
 ## Live inference session control.
 ##
 ## This step keeps the existing MediaMTX proxy relay mode and ffmpeg copy-relay
-## mode, and adds an external-worker mode.  The external-worker mode launches a
-## configurable long-running process with expanded input/output RTSP arguments.
-## This lets the real live inference worker be developed as a separate binary
-## while the web UI, start/stop lifecycle, and /cam-ai preview route remain
-## unchanged.
+## mode, external-worker mode, and in-process mode.  The in-process mode starts
+## a dedicated worker thread inside hailo_yolo_webdemo.  This is the preferred
+## direction for the compact demo build; the media pipeline is connected in a
+## later step.
 
 import std/[json, locks, os, osproc, streams, strformat, strutils, times]
 
 import ./cameras
 import ./live_target
+import ./in_process_worker
 
 const
   defaultRtspBaseUrl* = "rtsp://127.0.0.1:8554"
@@ -54,6 +54,7 @@ type
     externalWorkerArgsTemplate: string
     sessionMode: string
     relayProcess: Process
+    inProcessWorker: InProcessLiveWorker
     state: LiveSessionState
 
 proc utcStamp(): string =
@@ -124,6 +125,8 @@ proc normalizeSessionMode(value: string): string =
     result = "ffmpeg-copy"
   of "external", "external-worker", "worker", "live-worker":
     result = "external-worker"
+  of "in-process", "inprocess", "internal", "thread", "threaded":
+    result = "in-process"
   else:
     raise newException(ValueError, &"invalid live session mode: {value}")
 
@@ -305,6 +308,54 @@ proc startFfmpegCopyRelayLocked(
     controller.state.stoppedAt = utcStamp()
 
 
+proc startInProcessWorkerLocked(
+    controller: LiveSessionController;
+    slot: CameraSlot;
+    inputRtsp, outputPath, outputRtsp: string
+  ) =
+  discard controller.deleteOutputPath(outputPath)
+
+  controller.state = LiveSessionState(
+    status: "starting",
+    running: false,
+    mode: "in-process",
+    selectedCameraId: slot.id,
+    selectedCameraName: slot.name,
+    inputMediamtxPath: slot.mediamtxPath,
+    inputRtspUrl: inputRtsp,
+    outputMediamtxPath: outputPath,
+    outputRtspUrl: outputRtsp,
+    aiWebrtcPath: &"/{outputPath}",
+    relayPid: 0,
+    relayCommand: "in-process",
+    relayArgs: @[inputRtsp, outputRtsp],
+    lastExitCode: 0,
+    message: &"starting in-process live worker: /{slot.mediamtxPath} -> /{outputPath}",
+    startedAt: utcStamp(),
+    stoppedAt: ""
+  )
+
+  try:
+    controller.inProcessWorker = startInProcessLiveWorker(
+      inputRtsp,
+      outputRtsp,
+      slot.id,
+      slot.name
+    )
+    controller.state.status = "running"
+    controller.state.running = true
+    controller.state.message = &"in-process live worker thread is running for /{slot.mediamtxPath}; media pipeline is not connected yet"
+  except CatchableError as e:
+    if controller.inProcessWorker != nil:
+      controller.inProcessWorker.close()
+      controller.inProcessWorker = nil
+    controller.state.status = "error"
+    controller.state.running = false
+    controller.state.lastExitCode = -1
+    controller.state.message = &"failed to start in-process live worker: {e.msg}"
+    controller.state.stoppedAt = utcStamp()
+
+
 proc startExternalWorkerLocked(
     controller: LiveSessionController;
     slot: CameraSlot;
@@ -431,6 +482,7 @@ proc newLiveSessionController*(
   result.externalWorkerArgsTemplate = sanitizeArgTemplate(externalWorkerArgsTemplate, defaultExternalWorkerArgs)
   result.sessionMode = normalizeSessionMode(sessionMode)
   result.relayProcess = nil
+  result.inProcessWorker = nil
   result.state = defaultState(result.rtspBaseUrl)
 
 proc sessionJson*(controller: LiveSessionController): string {.gcsafe.} =
@@ -444,6 +496,16 @@ proc currentState*(controller: LiveSessionController): LiveSessionState {.gcsafe
     withLock controller.lock:
       controller.refreshProcessStateLocked()
       result = controller.state
+
+proc stopInProcessWorkerLocked(controller: LiveSessionController) =
+  if controller.inProcessWorker.isNil:
+    return
+  try:
+    controller.inProcessWorker.close()
+  except CatchableError:
+    discard
+  controller.inProcessWorker = nil
+
 
 proc stopProcessLocked(controller: LiveSessionController) =
   if controller.relayProcess.isNil:
@@ -494,9 +556,12 @@ proc startSession*(
     withLock controller.lock:
       controller.refreshProcessStateLocked()
       controller.stopProcessLocked()
+      controller.stopInProcessWorkerLocked()
       discard controller.deleteOutputPath(outputPath)
 
       case controller.sessionMode
+      of "in-process":
+        controller.startInProcessWorkerLocked(slot, inputRtsp, outputPath, outputRtsp)
       of "ffmpeg-copy":
         controller.startFfmpegCopyRelayLocked(slot, inputRtsp, outputPath, outputRtsp)
       of "external-worker":
@@ -518,6 +583,7 @@ proc stopSession*(controller: LiveSessionController; targetStore: LiveTargetStor
 
     withLock controller.lock:
       controller.stopProcessLocked()
+      controller.stopInProcessWorkerLocked()
       let outputPath = if controller.state.outputMediamtxPath.len > 0: controller.state.outputMediamtxPath else: defaultAiMediamtxPath
       let res = controller.deleteOutputPath(outputPath)
       if res.ok:
