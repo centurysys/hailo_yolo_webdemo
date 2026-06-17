@@ -81,6 +81,7 @@ type
     aiOverlay: bool
     aiMaxFrames: int
     aiPreviewPath: string
+    aiDebugOverlay: bool
 
   InProcessLiveWorker* = ref object
     thread: Thread[ptr InProcessWorkerState]
@@ -353,6 +354,7 @@ proc runAiOverlayWorkerMain(state: ptr InProcessWorkerState) =
   try:
     var options = defaultJobOptions()
     options.overlayPreset = resolveLiveAiOverlayPreset()
+    options.liveDebugOverlay = state.aiDebugOverlay
 
     var stats: OverlayStats
     {.cast(gcsafe).}:
@@ -558,7 +560,8 @@ proc startInProcessLiveWorker*(
     liveInferOwner: LiveInferOwner = nil;
     aiOverlay = false;
     aiMaxFrames = -1;
-    aiPreviewPath = ""
+    aiPreviewPath = "";
+    aiDebugOverlay = true
   ): InProcessLiveWorker =
   ## Start the internal live worker thread.
   ##
@@ -601,6 +604,7 @@ proc startInProcessLiveWorker*(
   result.state.aiOverlay = aiOverlay
   result.state.aiMaxFrames = if aiMaxFrames > 0: aiMaxFrames else: defaultAiMaxFrames()
   result.state.aiPreviewPath = if aiPreviewPath.strip().len > 0: aiPreviewPath.strip() else: defaultAiPreviewPath()
+  result.state.aiDebugOverlay = aiDebugOverlay
   result.joined = false
   result.closed = false
 

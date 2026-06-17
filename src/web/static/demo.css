@@ -372,6 +372,31 @@ button.danger {
 .session-actions button {
   margin: 0;
 }
+
+.live-settings-card {
+  border: 1px solid color-mix(in srgb, CanvasText 14%, Canvas);
+  border-radius: 0.65rem;
+  padding: 0.75rem;
+  margin: 0.75rem 0 0.9rem;
+  background: color-mix(in srgb, CanvasText 3%, Canvas);
+}
+.live-settings-card h4 {
+  margin: 0;
+}
+.compact-heading {
+  margin-bottom: 0.65rem;
+}
+.settings-actions {
+  display: flex;
+  gap: 0.65rem;
+  align-items: center;
+  flex-wrap: wrap;
+  margin-top: 0.65rem;
+}
+.settings-actions button {
+  margin: 0;
+}
+
 #session-message {
   max-height: 4.5rem;
   overflow: auto;

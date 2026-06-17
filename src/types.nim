@@ -39,6 +39,7 @@ type
     maxLabels*: int
     minBoxScore*: float32
     minLabelScore*: float32
+    liveDebugOverlay*: bool
 
   Detection* = object
     classId*: int
@@ -71,7 +72,8 @@ proc defaultJobOptions*(): JobOptions =
     maxBoxes: 12,
     maxLabels: 6,
     minBoxScore: 0.25.float32,
-    minLabelScore: 0.50.float32
+    minLabelScore: 0.50.float32,
+    liveDebugOverlay: false
   )
 
 proc toWire*(kind: JobKind): string =

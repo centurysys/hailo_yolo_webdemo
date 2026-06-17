@@ -36,6 +36,22 @@
         <button id="session-stop" class="secondary" type="button">Stop</button>
       </div>
 
+      <section class="live-settings-card" aria-labelledby="live-settings-title">
+        <div class="panel-heading compact-heading">
+          <h4 id="live-settings-title">Live AI settings</h4>
+          <span id="live-settings-edit-state" class="muted">editable while stopped</span>
+        </div>
+        <label class="checkbox-control">
+          <input id="live-debug-overlay" type="checkbox">
+          <span>AI activity marker</span>
+        </label>
+        <p class="settings-note muted">AI preview 左上に小さな点滅マーカーと frame 番号を表示します。変更は次回 Start 時に反映されます。</p>
+        <div class="settings-actions">
+          <button id="live-settings-save" class="secondary" type="button">Saved</button>
+          <span id="live-settings-status" class="muted"></span>
+        </div>
+      </section>
+
       <dl class="live-status-list">
         <div>
           <dt>Selected camera</dt>

@@ -11,6 +11,7 @@ import ./cameras
 import ./live_target
 import ./in_process_worker
 import ./live_infer_owner
+import ./settings
 
 const
   defaultRtspBaseUrl* = "rtsp://127.0.0.1:8554"
@@ -504,14 +505,16 @@ proc startInProcessWorkerLocked(
 proc startInProcessAiWorkerLocked(
     controller: LiveSessionController;
     slot: CameraSlot;
-    inputRtsp, outputPath, outputRtsp: string
+    inputRtsp, outputPath, outputRtsp: string;
+    liveSettings: LiveSettingsState
   ) =
   discard controller.deleteOutputPath(outputPath)
 
   let args = @[
     "--input", inputRtsp,
     "--output", outputRtsp,
-    "--decoder", getEnv("HAILO_DEMO_LIVE_DECODER", "h264_v4l2m2m")
+    "--decoder", getEnv("HAILO_DEMO_LIVE_DECODER", "h264_v4l2m2m"),
+    "--debug-overlay", $liveSettings.debugOverlay
   ]
 
   controller.state = LiveSessionState(
@@ -542,7 +545,8 @@ proc startInProcessAiWorkerLocked(
       slot.name,
       controller.ffmpegPath,
       liveInferOwner = controller.liveInferOwner,
-      aiOverlay = true
+      aiOverlay = true,
+      aiDebugOverlay = liveSettings.debugOverlay
     )
     let snap = controller.inProcessWorker.snapshot()
     controller.state.relayPid = snap.relayPid
@@ -772,7 +776,8 @@ proc stopProcessLocked(controller: LiveSessionController) =
 proc startSession*(
     controller: LiveSessionController;
     cameras: LiveCameraStore;
-    targetStore: LiveTargetStore
+    targetStore: LiveTargetStore;
+    liveSettings = defaultLiveSettings()
   ): LiveSessionState {.gcsafe.} =
   {.cast(gcsafe).}:
     if controller == nil:
@@ -802,7 +807,7 @@ proc startSession*(
 
       case controller.sessionMode
       of "in-process-ai":
-        controller.startInProcessAiWorkerLocked(slot, inputRtsp, outputPath, outputRtsp)
+        controller.startInProcessAiWorkerLocked(slot, inputRtsp, outputPath, outputRtsp, liveSettings)
       of "in-process":
         controller.startInProcessWorkerLocked(slot, inputRtsp, outputPath, outputRtsp)
       of "ffmpeg-copy":
@@ -847,17 +852,19 @@ proc close*(controller: LiveSessionController) =
 proc prepareSession*(
     controller: LiveSessionController;
     cameras: LiveCameraStore;
-    targetStore: LiveTargetStore
+    targetStore: LiveTargetStore;
+    liveSettings = defaultLiveSettings()
   ): LiveSessionState {.gcsafe.} =
-  result = controller.startSession(cameras, targetStore)
+  result = controller.startSession(cameras, targetStore, liveSettings)
 
 proc prepareSessionJson*(
     controller: LiveSessionController;
     cameras: LiveCameraStore;
-    targetStore: LiveTargetStore
+    targetStore: LiveTargetStore;
+    liveSettings = defaultLiveSettings()
   ): string {.gcsafe.} =
   {.cast(gcsafe).}:
-    result = pretty(sessionToJson(controller.startSession(cameras, targetStore))) & "\n"
+    result = pretty(sessionToJson(controller.startSession(cameras, targetStore, liveSettings))) & "\n"
 
 proc stopSessionJson*(controller: LiveSessionController; targetStore: LiveTargetStore = nil): string {.gcsafe.} =
   {.cast(gcsafe).}:

@@ -14,7 +14,7 @@ import std/[os, random]
 
 import config
 import jobs/[runner, store]
-import live/[cameras, live_infer_owner, live_session, live_target]
+import live/[cameras, live_infer_owner, live_session, live_target, settings]
 import util/paths
 import web/server
 
@@ -31,6 +31,7 @@ when isMainModule:
   let pathctlPath = getMediamtxPathctlPath()
   let cameraStore = newLiveCameraStore(liveCameraConfigPath, pathctlPath)
   let targetStore = newLiveTargetStore(liveTargetConfigPath)
+  let settingsStore = newLiveSettingsStore(liveSettingsConfigPath)
   let liveOwner = startLiveInferOwner()
   let sessionController = newLiveSessionController(
     liveRtspBaseUrl,
@@ -56,6 +57,7 @@ when isMainModule:
   echo "hefPath : ", hefPath
   echo "cameraConfigPath: ", liveCameraConfigPath
   echo "liveTargetConfigPath: ", liveTargetConfigPath
+  echo "liveSettingsConfigPath: ", liveSettingsConfigPath
   echo "liveRtspBaseUrl: ", liveRtspBaseUrl
   echo "liveSessionMode: ", getLiveSessionMode()
   echo "liveFfmpeg: ", getLiveFfmpegPath()
@@ -65,11 +67,12 @@ when isMainModule:
   echo "mediamtxPathctl: ", pathctlPath
 
   try:
-    startServer(jobStore, cameraStore, targetStore, sessionController)
+    startServer(jobStore, cameraStore, targetStore, settingsStore, sessionController)
   finally:
     jobRunner.close()
     sessionController.close()
     liveOwner.close()
+    settingsStore.close()
     targetStore.close()
     cameraStore.close()
     jobStore.close()

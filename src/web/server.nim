@@ -10,17 +10,20 @@ import ../jobs/store
 import ../live/cameras
 import ../live/live_session
 import ../live/live_target
+import ../live/settings
 import ./handlers
 
 proc startServer*(
     jobStore: JobStore;
     cameraStore: LiveCameraStore;
     targetStore: LiveTargetStore;
+    settingsStore: LiveSettingsStore;
     sessionController: LiveSessionController
   ) =
   setJobStore(jobStore)
   setLiveCameraStore(cameraStore)
   setLiveTargetStore(targetStore)
+  setLiveSettingsStore(settingsStore)
   setLiveSessionController(sessionController)
 
   var router: Router
@@ -33,6 +36,8 @@ proc startServer*(
   router.get("/api/live/target", handleApiLiveTarget)
   router.put("/api/live/target/*", handleApiLiveTargetSet)
   router.delete("/api/live/target", handleApiLiveTargetClear)
+  router.get("/api/live/settings", handleApiLiveSettings)
+  router.put("/api/live/settings", handleApiLiveSettingsSet)
   router.get("/api/live/session", handleApiLiveSession)
   router.post("/api/live/session/start", handleApiLiveSessionStart)
   router.post("/api/live/session/stop", handleApiLiveSessionStop)

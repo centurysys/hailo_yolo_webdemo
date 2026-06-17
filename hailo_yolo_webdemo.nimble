@@ -7,8 +7,8 @@ license       = "MIT"
 srcDir        = "src"
 binDir        = "bin"
 bin           = @[
-    "hailo_yolo_webdemo",
-    "hailo_live_rtsp_publish_probe"
+#    "hailo_live_rtsp_publish_probe",
+    "hailo_yolo_webdemo"
 ]
 
 

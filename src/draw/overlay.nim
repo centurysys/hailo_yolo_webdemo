@@ -1029,6 +1029,51 @@ proc drawLabel(image: Image; ctx: Context; font: Font; d: Detection) =
     translate(vec2(x + LabelPadX, y + 2.float32))
   )
 
+proc drawLiveDebugOverlay(image: Image; font: Font; hasFont: bool; frameIndex: int; detections: int; boxes: int; threshold: float32) =
+  ## Draw an optional compact activity marker for the live AI preview.
+  ## Keep it intentionally small: the goal is to show that frames are passing
+  ## through the AI pipeline without covering too much of the camera image.
+  const spinnerFrames = ["|", "/", "-", "\\"]
+  let
+    safeFrame = max(0, frameIndex)
+    spinner = spinnerFrames[safeFrame mod spinnerFrames.len]
+    text = &"AI {spinner} f={safeFrame}"
+    panelX = 10.float32
+    panelY = 10.float32
+    panelH = 42.float32
+    panelW = min(image.width.float32 - 20.float32, max(150.float32, text.len.float32 * 15.float32 + 48.float32))
+
+  if panelW <= 40.float32 or image.height < 58:
+    return
+
+  let ctx = newContext(image)
+  ctx.fillStyle = rgba(0, 0, 0, 172)
+  ctx.fillRect(rect(vec2(panelX, panelY), vec2(panelW, panelH)))
+
+  ## Blink a small square every frame.  It remains useful even when the preview
+  ## is scaled down and the text is hard to read.
+  if safeFrame mod 2 == 0:
+    ctx.fillStyle = rgba(31, 136, 61, 255)
+    ctx.fillRect(rect(vec2(panelX + 10.float32, panelY + 12.float32), vec2(16.float32, 16.float32)))
+  else:
+    ctx.fillStyle = rgba(31, 136, 61, 96)
+    ctx.fillRect(rect(vec2(panelX + 13.float32, panelY + 15.float32), vec2(10.float32, 10.float32)))
+
+  if hasFont:
+    var textFont = font
+    textFont.size = 26.float32
+    textFont.paint.color = color(1, 1, 1)
+    image.fillText(
+      textFont.typeset(text, vec2(panelW - 44.float32, 34.float32)),
+      translate(vec2(panelX + 34.float32, panelY + 5.float32))
+    )
+  else:
+    ## Last-resort indicator when the font is missing.  It still shows that this
+    ## frame passed through the AI overlay path.
+    ctx.fillStyle = rgba(255, 255, 255, 230)
+    ctx.fillRect(rect(vec2(panelX + 36.float32, panelY + 14.float32), vec2(72.float32, 5.float32)))
+    ctx.fillRect(rect(vec2(panelX + 36.float32, panelY + 24.float32), vec2(48.float32, 5.float32)))
+
 proc shouldDrawLabel(d: Detection; labelsDrawn: int; options: OverlayDrawOptions): bool =
   if labelsDrawn >= options.maxLabels:
     return false
@@ -1135,6 +1180,23 @@ proc moveRgbxDataToPixieImage(frame: var OwnedRGBXFrame): Image =
 
 proc movePixieImageDataBack(image: var Image; frame: var OwnedRGBXFrame) =
   frame.data = move cast[ptr seq[PixelRGBX]](addr image.data)[]
+
+
+proc drawLiveDebugOverlayOnRgbxFrame(
+    frame: var OwnedRGBXFrame;
+    font: Font;
+    hasFont: bool;
+    frameIndex: int;
+    detections: int;
+    boxes: int;
+    threshold: float32
+  ) =
+  var image = moveRgbxDataToPixieImage(frame)
+  try:
+    image.drawLiveDebugOverlay(font, hasFont, frameIndex, detections, boxes, threshold)
+  finally:
+    movePixieImageDataBack(image, frame)
+
 
 
 proc resolveVideoPreviewFrame(): int =
@@ -2034,6 +2096,7 @@ proc processThreadedVideoPipelineFrameRtsp(
     font: Font;
     hasFont: bool;
     drawOptions: OverlayDrawOptions;
+    liveDebugOverlay: bool;
     previewOutputPath: string;
     previewFrameNumber: int;
     previewSaved: var bool;
@@ -2079,6 +2142,15 @@ proc processThreadedVideoPipelineFrameRtsp(
     hasFont,
     drawOptions
   )
+  if liveDebugOverlay:
+    item.rgbx.value.drawLiveDebugOverlayOnRgbxFrame(
+      font,
+      hasFont,
+      stats.videoFrames + 1,
+      yoloResult.detections.len,
+      drawResult.boxes,
+      drawOptions.minBoxScore
+    )
   stats.boxesDrawn += drawResult.boxes
   stats.labelsDrawn += drawResult.labels
   stats.drawMs += elapsedMs(stageStart)
@@ -2306,6 +2378,7 @@ proc videoPipelineLibavRtspConsumerMain(state: VideoPipelineWorkerState) {.threa
             loadedFont.font,
             loadedFont.hasFont,
             drawOptions,
+            state.options.liveDebugOverlay,
             previewOutputPath,
             state.previewFrameNumber,
             previewSaved,

@@ -20,6 +20,7 @@ const
   stateRoot* = "/var/lib/hailo-demo"
   liveCameraConfigPath* = stateRoot & "/live-cameras.json"
   liveTargetConfigPath* = stateRoot & "/live-target.json"
+  liveSettingsConfigPath* = stateRoot & "/live-settings.json"
   mediamtxPathctlPath* = "/usr/local/sbin/mediamtx-pathctl"
   liveRtspBaseUrl* = "rtsp://127.0.0.1:8554"
   liveFfmpegPath* = "/usr/bin/ffmpeg"

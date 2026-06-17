@@ -8,6 +8,7 @@ import ../jobs/[runner, store]
 import ../live/cameras
 import ../live/live_target
 import ../live/live_session
+import ../live/settings
 import ../types
 import ../util/[ids, paths]
 import ./pages
@@ -17,6 +18,7 @@ var gStorePtr: pointer
 var gCameraStorePtr: pointer
 var gTargetStorePtr: pointer
 var gSessionControllerPtr: pointer
+var gSettingsStorePtr: pointer
 
 proc setJobStore*(store: JobStore) =
   ## Keep only an untraced pointer in global state so Mummy handler procs stay
@@ -53,6 +55,13 @@ proc setLiveSessionController*(controller: LiveSessionController) =
 proc currentLiveSessionController(): LiveSessionController {.gcsafe.} =
   {.cast(gcsafe).}:
     result = cast[LiveSessionController](gSessionControllerPtr)
+
+proc setLiveSettingsStore*(store: LiveSettingsStore) =
+  gSettingsStorePtr = cast[pointer](store)
+
+proc currentLiveSettingsStore(): LiveSettingsStore {.gcsafe.} =
+  {.cast(gcsafe).}:
+    result = cast[LiveSettingsStore](gSettingsStorePtr)
 
 proc respondText(request: Request, status: int, text: string) {.gcsafe.} =
   var headers: HttpHeaders
@@ -214,6 +223,18 @@ proc activeJobConflictMessage(store: JobStore): string {.gcsafe.} =
 
   let job = maybeJob.get
   &"file inference job {job.id} is {job.status.toWire}; wait for it to finish before starting Live preview"
+
+proc liveSettingsCanEdit(): bool {.gcsafe.} =
+  let session = currentLiveSessionController()
+  if session == nil:
+    return true
+  try:
+    let state = session.currentState()
+    let status = state.status.toLowerAscii()
+    result = not (state.running or status in ["starting", "running", "stopping"])
+  except CatchableError:
+    result = false
+
 
 proc cleanupNginxUploadTemp(request: Request) {.gcsafe.} =
   ## If nginx has already stored the upload and passed it through X-FILE, do not
@@ -424,6 +445,33 @@ proc handleApiLiveTargetClear*(request: Request) {.gcsafe.} =
   except CatchableError as e:
     request.respondText(500, e.msg)
 
+proc handleApiLiveSettings*(request: Request) {.gcsafe.} =
+  let store = currentLiveSettingsStore()
+  if store == nil:
+    request.respondText(500, "live settings store is not initialized")
+    return
+
+  request.respondJson(200, store.settingsJson(liveSettingsCanEdit()))
+
+proc handleApiLiveSettingsSet*(request: Request) {.gcsafe.} =
+  let store = currentLiveSettingsStore()
+  if store == nil:
+    request.respondText(500, "live settings store is not initialized")
+    return
+
+  if not liveSettingsCanEdit():
+    request.respondText(409, "stop live AI preview before changing live settings")
+    return
+
+  try:
+    request.respondJson(200, store.updateSettingsJson(request.body, true))
+  except ValueError as e:
+    request.respondText(400, e.msg)
+  except JsonParsingError as e:
+    request.respondText(400, e.msg)
+  except CatchableError as e:
+    request.respondText(500, e.msg)
+
 proc handleApiLiveSession*(request: Request) {.gcsafe.} =
   let session = currentLiveSessionController()
   if session == nil:
@@ -454,7 +502,9 @@ proc handleApiLiveSessionStart*(request: Request) {.gcsafe.} =
       return
 
   try:
-    request.respondJson(200, session.prepareSessionJson(cameraStore, targetStore))
+    let settingsStore = currentLiveSettingsStore()
+    let liveSettings = if settingsStore == nil: defaultLiveSettings() else: settingsStore.getSettings()
+    request.respondJson(200, session.prepareSessionJson(cameraStore, targetStore, liveSettings))
   except ValueError as e:
     request.respondText(400, e.msg)
   except CatchableError as e:
