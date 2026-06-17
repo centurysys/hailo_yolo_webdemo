@@ -35,6 +35,13 @@ type
     relayCommand*: string
     relayArgs*: seq[string]
     lastExitCode*: int
+    decodeProbeAttempted*: bool
+    decodeProbeOk*: bool
+    decodeProbeFrames*: int
+    decodeProbeWidth*: int
+    decodeProbeHeight*: int
+    decodeProbeMs*: int
+    decodeProbeMessage*: string
     message*: string
     startedAt*: string
     stoppedAt*: string
@@ -167,6 +174,13 @@ proc sessionToJson(state: LiveSessionState): JsonNode =
   result["relayCommand"] = %state.relayCommand
   result["relayArgs"] = %state.relayArgs
   result["lastExitCode"] = %state.lastExitCode
+  result["decodeProbeAttempted"] = %state.decodeProbeAttempted
+  result["decodeProbeOk"] = %state.decodeProbeOk
+  result["decodeProbeFrames"] = %state.decodeProbeFrames
+  result["decodeProbeWidth"] = %state.decodeProbeWidth
+  result["decodeProbeHeight"] = %state.decodeProbeHeight
+  result["decodeProbeMs"] = %state.decodeProbeMs
+  result["decodeProbeMessage"] = %state.decodeProbeMessage
   result["message"] = %state.message
   result["startedAt"] = %state.startedAt
   result["stoppedAt"] = %state.stoppedAt
@@ -185,6 +199,13 @@ proc markStoppedLocked(controller: LiveSessionController; message: string; statu
   controller.state.relayPid = 0
   controller.state.relayCommand = ""
   controller.state.relayArgs = @[]
+  controller.state.decodeProbeAttempted = false
+  controller.state.decodeProbeOk = false
+  controller.state.decodeProbeFrames = 0
+  controller.state.decodeProbeWidth = 0
+  controller.state.decodeProbeHeight = 0
+  controller.state.decodeProbeMs = 0
+  controller.state.decodeProbeMessage = ""
   controller.state.stoppedAt = utcStamp()
 
 proc refreshProcessStateLocked(controller: LiveSessionController) =
@@ -211,6 +232,13 @@ proc refreshInProcessStateLocked(controller: LiveSessionController) =
   let snap = controller.inProcessWorker.snapshot()
   controller.state.relayPid = snap.relayPid
   controller.state.lastExitCode = snap.exitCode
+  controller.state.decodeProbeAttempted = snap.decodeProbeAttempted
+  controller.state.decodeProbeOk = snap.decodeProbeOk
+  controller.state.decodeProbeFrames = snap.decodeProbeFrames
+  controller.state.decodeProbeWidth = snap.decodeProbeWidth
+  controller.state.decodeProbeHeight = snap.decodeProbeHeight
+  controller.state.decodeProbeMs = snap.decodeProbeMs
+  controller.state.decodeProbeMessage = snap.decodeProbeMessage
   if snap.message.len > 0:
     controller.state.message = snap.message
 
@@ -366,6 +394,13 @@ proc startInProcessWorkerLocked(
     let snap = controller.inProcessWorker.snapshot()
     controller.state.relayPid = snap.relayPid
     controller.state.lastExitCode = snap.exitCode
+    controller.state.decodeProbeAttempted = snap.decodeProbeAttempted
+    controller.state.decodeProbeOk = snap.decodeProbeOk
+    controller.state.decodeProbeFrames = snap.decodeProbeFrames
+    controller.state.decodeProbeWidth = snap.decodeProbeWidth
+    controller.state.decodeProbeHeight = snap.decodeProbeHeight
+    controller.state.decodeProbeMs = snap.decodeProbeMs
+    controller.state.decodeProbeMessage = snap.decodeProbeMessage
     controller.state.status = "running"
     controller.state.running = true
     controller.state.message = &"in-process live worker is starting /{slot.mediamtxPath} -> /{outputPath} with ffmpeg copy relay; inference stage is not connected yet"

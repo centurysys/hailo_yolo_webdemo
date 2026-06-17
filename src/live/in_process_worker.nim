@@ -9,6 +9,7 @@
 import std/[locks, os, strformat]
 
 import ./live_pipeline
+import ./live_decode_probe
 
 const
   DefaultPollIntervalMs = 200
@@ -21,6 +22,13 @@ type
     stopRequested*: bool
     relayPid*: int
     exitCode*: int
+    decodeProbeAttempted*: bool
+    decodeProbeOk*: bool
+    decodeProbeFrames*: int
+    decodeProbeWidth*: int
+    decodeProbeHeight*: int
+    decodeProbeMs*: int
+    decodeProbeMessage*: string
     message*: string
 
   InProcessWorkerState = object
@@ -32,6 +40,8 @@ type
     outputRtsp: string
     cameraId: string
     cameraName: string
+    liveDecoderName: string
+    decodeProbeFrames: int
 
   InProcessLiveWorker* = ref object
     thread: Thread[ptr InProcessWorkerState]
@@ -59,9 +69,34 @@ proc setWorkerMessage(state: ptr InProcessWorkerState; message: string) =
     state.snapshot.stopRequested = state.stopRequested
     state.snapshot.message = message
 
+proc setDecodeProbeSnapshot(state: ptr InProcessWorkerState; stats: LiveDecodeProbeStats) =
+  withLock state.lock:
+    state.snapshot.stopRequested = state.stopRequested
+    state.snapshot.decodeProbeAttempted = stats.attempted
+    state.snapshot.decodeProbeOk = stats.ok
+    state.snapshot.decodeProbeFrames = stats.frames
+    state.snapshot.decodeProbeWidth = stats.width
+    state.snapshot.decodeProbeHeight = stats.height
+    state.snapshot.decodeProbeMs = stats.elapsedMs
+    state.snapshot.decodeProbeMessage = stats.message
+    if stats.message.len > 0:
+      state.snapshot.message = stats.message
+
 proc workerStopRequested(state: ptr InProcessWorkerState): bool =
   withLock state.lock:
     result = state.stopRequested
+
+proc workerRunningMessage(state: ptr InProcessWorkerState): string =
+  var probeAttempted = false
+  var probeMessage = ""
+  withLock state.lock:
+    probeAttempted = state.snapshot.decodeProbeAttempted
+    probeMessage = state.snapshot.decodeProbeMessage
+
+  if probeAttempted and probeMessage.len > 0:
+    result = &"in-process live worker is publishing /{state.cameraId} to /cam-ai via ffmpeg-copy pipeline; {probeMessage}; inference stage is not connected yet"
+  else:
+    result = &"in-process live worker is publishing /{state.cameraId} to /cam-ai via ffmpeg-copy pipeline; inference stage is not connected yet"
 
 proc requestStop(worker: InProcessLiveWorker) =
   if worker.isNil or worker.closed:
@@ -111,6 +146,29 @@ proc inProcessWorkerMain(state: ptr InProcessWorkerState) {.thread.} =
         exitCode = 0,
         message = finalMessage
       )
+      if state.decodeProbeFrames > 0:
+        setWorkerMessage(state, &"probing native RTSP decode for /{state.cameraId}")
+        let probe = runLiveDecodeProbe(
+          state.inputRtsp,
+          decoderName = state.liveDecoderName,
+          maxFrames = state.decodeProbeFrames
+        )
+        setDecodeProbeSnapshot(state, probe)
+        echo probe.message
+      else:
+        setDecodeProbeSnapshot(state, LiveDecodeProbeStats(
+          attempted: false,
+          ok: true,
+          frames: 0,
+          width: 0,
+          height: 0,
+          decoderName: state.liveDecoderName,
+          elapsedMs: 0,
+          openMs: 0,
+          readMs: 0,
+          message: "live decode probe is disabled"
+        ))
+
       echo finalMessage
     except CatchableError as e:
       finalExitCode = -1
@@ -159,7 +217,7 @@ proc inProcessWorkerMain(state: ptr InProcessWorkerState) {.thread.} =
         finished = false,
         relayPid = pollRes.relayPid,
         exitCode = pollRes.exitCode,
-        message = &"in-process live worker is publishing /{state.cameraId} to /cam-ai via ffmpeg-copy pipeline; inference stage is not connected yet"
+        message = workerRunningMessage(state)
       )
 
       sleep(DefaultPollIntervalMs)
@@ -220,6 +278,8 @@ proc startInProcessLiveWorker*(
   result.state.outputRtsp = outputRtsp
   result.state.cameraId = cameraId
   result.state.cameraName = cameraName
+  result.state.liveDecoderName = getLiveDecoderName()
+  result.state.decodeProbeFrames = getLiveDecodeProbeFrames()
   result.joined = false
   result.closed = false
 
