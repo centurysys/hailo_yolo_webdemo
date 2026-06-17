@@ -30,7 +30,11 @@ when isMainModule:
   let jobStore = newJobStore()
   let cameraStore = newLiveCameraStore(liveCameraConfigPath, mediamtxPathctlPath)
   let targetStore = newLiveTargetStore(liveTargetConfigPath)
-  let sessionController = newLiveSessionController(liveRtspBaseUrl)
+  let sessionController = newLiveSessionController(
+    liveRtspBaseUrl,
+    getLiveRelayBinary(),
+    getLiveRelayLogLevel()
+  )
   let syncResults = cameraStore.syncEnabledCameras()
   for item in syncResults:
     if item.mediamtx.ok:
@@ -47,6 +51,8 @@ when isMainModule:
   echo "cameraConfigPath: ", liveCameraConfigPath
   echo "liveTargetConfigPath: ", liveTargetConfigPath
   echo "liveRtspBaseUrl: ", liveRtspBaseUrl
+  echo "liveRelayBinary: ", getLiveRelayBinary()
+  echo "liveRelayLogLevel: ", getLiveRelayLogLevel()
 
   try:
     startServer(jobStore, cameraStore, targetStore, sessionController)

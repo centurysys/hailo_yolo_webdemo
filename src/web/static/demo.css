@@ -376,3 +376,8 @@ button.danger {
   max-height: 4.5rem;
   overflow: auto;
 }
+
+/* Live page disabled controls should indicate unavailable, not background waiting. */
+.live-page button[disabled] {
+  cursor: not-allowed;
+}

@@ -22,11 +22,19 @@ const
   liveTargetConfigPath* = stateRoot & "/live-target.json"
   mediamtxPathctlPath* = "/usr/local/sbin/mediamtx-pathctl"
   liveRtspBaseUrl* = "rtsp://127.0.0.1:8554"
+  defaultLiveRelayBinary* = "ffmpeg"
+  defaultLiveRelayLogLevel* = "warning"
 
   hefPath* = "/usr/local/share/hailo-demo/yolov11s.hef"
   fontPath* = "/usr/share/fonts/dejavu/DejaVuSans.ttf"
 
   maxJobsToKeep* = 20
+
+proc getLiveRelayBinary*(): string =
+  result = getEnv("HAILO_DEMO_LIVE_RELAY_BIN", defaultLiveRelayBinary)
+
+proc getLiveRelayLogLevel*(): string =
+  result = getEnv("HAILO_DEMO_LIVE_RELAY_LOG_LEVEL", defaultLiveRelayLogLevel)
 
 proc getListenHost*(): string =
   ## Read at server startup time, not as a module-global let, so rebuild/run

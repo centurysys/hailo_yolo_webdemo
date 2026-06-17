@@ -6,6 +6,7 @@ const selectedName = document.getElementById('selected-camera-name');
 const selectedWebrtcLink = document.getElementById('selected-webrtc-link');
 const aiWebrtcLink = document.getElementById('ai-webrtc-link');
 const aiPipelineStatus = document.getElementById('ai-pipeline-status');
+const aiPreviewBox = document.getElementById('ai-preview-box');
 const sessionStartButton = document.getElementById('session-start');
 const sessionStopButton = document.getElementById('session-stop');
 const sessionInputRtsp = document.getElementById('session-input-rtsp');
@@ -43,7 +44,7 @@ let liveSession = {
   outputMediamtxPath: 'cam-ai',
   outputRtspUrl: 'rtsp://127.0.0.1:8554/cam-ai',
   aiWebrtcPath: '/cam-ai',
-  message: 'live inference pipeline is stopped',
+  message: 'live relay is stopped',
   startedAt: '',
   stoppedAt: '',
 };
@@ -90,16 +91,54 @@ function hasSelectableTarget() {
   return Boolean(slot && slot.enabled && slot.source);
 }
 
+
+function renderAiPreviewBox() {
+  if (!aiPreviewBox) return;
+  const status = liveSession.status || liveTarget.pipelineStatus || 'stopped';
+  const shouldEmbed = status === 'running' || liveSession.running;
+
+  aiPreviewBox.replaceChildren();
+  if (shouldEmbed) {
+    const frame = document.createElement('iframe');
+    frame.className = 'webrtc-preview-frame ai-preview-frame';
+    frame.src = aiWebrtcUrl();
+    frame.title = 'AI preview WebRTC stream';
+    frame.loading = 'lazy';
+    frame.allow = 'autoplay; fullscreen; picture-in-picture';
+    aiPreviewBox.appendChild(frame);
+    return;
+  }
+
+  const placeholder = document.createElement('div');
+  placeholder.className = 'ai-preview-placeholder';
+
+  const label = document.createElement('strong');
+  label.textContent = '/cam-ai';
+  placeholder.appendChild(label);
+
+  const text = document.createElement('span');
+  text.className = 'muted';
+  if (status === 'error') {
+    text.textContent = 'ライブリレーが停止しました。状態を確認して再度 Start AI relay を実行してください。';
+  } else {
+    text.textContent = 'Start AI relay 後に、選択中カメラの /cam-ai stream を表示します。';
+  }
+  placeholder.appendChild(text);
+
+  aiPreviewBox.appendChild(placeholder);
+}
+
 function updateSessionPanel() {
   const status = liveSession.status || liveTarget.pipelineStatus || 'stopped';
   aiPipelineStatus.textContent = status;
   sessionInputRtsp.textContent = liveSession.inputRtspUrl || 'not prepared';
   sessionOutputRtsp.textContent = liveSession.outputRtspUrl || 'not prepared';
   sessionMessage.textContent = liveSession.message || liveTarget.message || '';
+  renderAiPreviewBox();
 
-  const canPrepare = hasSelectableTarget() && status !== 'prepared' && status !== 'running' && status !== 'starting';
+  const canPrepare = hasSelectableTarget() && status !== 'running' && status !== 'starting';
   sessionStartButton.disabled = !canPrepare;
-  sessionStopButton.disabled = status === 'stopped' || status === 'not-started';
+  sessionStopButton.disabled = !(liveSession.running || status === 'running' || status === 'starting');
 }
 
 function updateSelectedPanel() {
@@ -345,13 +384,13 @@ async function selectCamera(cameraId) {
 
 async function prepareSession() {
   try {
-    setMessage('preparing live AI route...');
+    setMessage('starting live AI relay...');
     const res = await fetch('/api/live/session/start', { method: 'POST' });
     if (!res.ok) throw new Error(await res.text());
     liveSession = await res.json();
     await loadLiveTarget();
     updateSelectedPanel();
-    setMessage(liveSession.message || 'live AI route prepared');
+    setMessage(liveSession.message || 'live AI relay started');
   } catch (err) {
     setMessage('error: ' + err.message, true);
   }
@@ -359,13 +398,13 @@ async function prepareSession() {
 
 async function stopSession() {
   try {
-    setMessage('stopping live AI route...');
+    setMessage('stopping live AI relay...');
     const res = await fetch('/api/live/session/stop', { method: 'POST' });
     if (!res.ok) throw new Error(await res.text());
     liveSession = await res.json();
     await loadLiveTarget();
     updateSelectedPanel();
-    setMessage('live AI route stopped');
+    setMessage('live AI relay stopped');
   } catch (err) {
     setMessage('error: ' + err.message, true);
   }
