@@ -1,23 +1,22 @@
 ## Live inference session control.
 ##
-## This step starts a temporary pass-through relay process for the selected
-## camera.  The relay publishes the selected raw camera stream to /cam-ai so the
-## AI preview panel can be verified end-to-end before the real
-## decode/infer/overlay/encode pipeline is connected.
-##
-## The relay is intentionally isolated behind this controller.  Later, the
-## ffmpeg-copy relay can be replaced by the in-process inference pipeline while
-## keeping the HTTP API and UI state model stable.
+## This step keeps the existing MediaMTX proxy relay mode, and adds an optional
+## ffmpeg copy-relay mode.  The ffmpeg mode does not run inference yet, but it
+## exercises a long-running process that reads the selected MediaMTX RTSP path
+## and publishes /cam-ai.  This is a closer control-shape match to the upcoming
+## in-process decode/infer/overlay/encode pipeline, while still leaving the
+## proven MediaMTX proxy mode available as the safe default.
 
-import std/[json, locks, os, osproc, strformat, strutils, times]
+import std/[json, locks, os, osproc, streams, strformat, strutils, times]
 
 import ./cameras
 import ./live_target
 
 const
   defaultRtspBaseUrl* = "rtsp://127.0.0.1:8554"
-  defaultRelayBinary* = "ffmpeg"
-  defaultRelayLogLevel* = "warning"
+  defaultPathctlPath* = "/usr/local/sbin/mediamtx-pathctl"
+  defaultFfmpegPath* = "/usr/bin/ffmpeg"
+  defaultSessionMode* = "mediamtx-proxy"
 
 type
   LiveSessionState* = object
@@ -39,17 +38,21 @@ type
     startedAt*: string
     stoppedAt*: string
 
+  PathctlResult = object
+    ok: bool
+    message: string
+    exitCode: int
+
   LiveSessionController* = ref object
     lock: Lock
     rtspBaseUrl: string
-    relayBinary: string
-    relayLogLevel: string
+    pathctlPath: string
+    ffmpegPath: string
+    sessionMode: string
     relayProcess: Process
     state: LiveSessionState
 
 proc utcStamp(): string =
-  ## Keep the timestamp plain and stable for logs/UI.  The container may not
-  ## always have full timezone data, so UTC avoids local timezone surprises.
   result = now().utc.format("yyyy-MM-dd'T'HH:mm:ss'Z'")
 
 proc normalizeBaseUrl(value: string): string =
@@ -64,18 +67,20 @@ proc mediaPathUrl(baseUrl, path: string): string =
   let cleanPath = path.strip(chars = {'/'})
   &"{cleanBase}/{cleanPath}"
 
-proc sanitizeRelayBinary(value: string): string =
+proc sanitizeExecutablePath(value, defaultValue: string): string =
   result = value.strip()
   if result.len == 0:
-    result = defaultRelayBinary
+    result = defaultValue
 
-proc sanitizeRelayLogLevel(value: string): string =
-  let v = value.strip().toLowerAscii()
-  case v
-  of "quiet", "panic", "fatal", "error", "warning", "info", "verbose", "debug", "trace":
-    result = v
+proc normalizeSessionMode(value: string): string =
+  let mode = value.strip().toLowerAscii()
+  case mode
+  of "", "proxy", "mediamtx", "mediamtx-proxy":
+    result = "mediamtx-proxy"
+  of "ffmpeg", "ffmpeg-copy", "copy":
+    result = "ffmpeg-copy"
   else:
-    result = defaultRelayLogLevel
+    raise newException(ValueError, &"invalid live session mode: {value}")
 
 proc defaultState(rtspBaseUrl: string): LiveSessionState =
   let aiPath = defaultAiMediamtxPath
@@ -119,27 +124,6 @@ proc sessionToJson(state: LiveSessionState): JsonNode =
   result["startedAt"] = %state.startedAt
   result["stoppedAt"] = %state.stoppedAt
 
-proc buildRelayArgs(inputRtspUrl, outputRtspUrl, logLevel: string): seq[string] =
-  ## Pass-through relay used until the real inference pipeline is connected.
-  ##
-  ## The selected camera is already proxied by MediaMTX as /camN.  This command
-  ## reads it over RTSP/TCP and republishes it to /cam-ai.  It does not decode,
-  ## infer, overlay, or re-encode.
-  result = @[
-    "-nostdin",
-    "-hide_banner",
-    "-loglevel", logLevel,
-    "-rtsp_transport", "tcp",
-    "-fflags", "nobuffer",
-    "-flags", "low_delay",
-    "-i", inputRtspUrl,
-    "-an",
-    "-c:v", "copy",
-    "-rtsp_transport", "tcp",
-    "-f", "rtsp",
-    outputRtspUrl
-  ]
-
 proc markStoppedLocked(controller: LiveSessionController; message: string; status = "stopped") =
   let outputPath = if controller.state.outputMediamtxPath.len > 0: controller.state.outputMediamtxPath else: defaultAiMediamtxPath
   controller.state.status = status
@@ -156,73 +140,222 @@ proc markStoppedLocked(controller: LiveSessionController; message: string; statu
   controller.state.relayArgs = @[]
   controller.state.stoppedAt = utcStamp()
 
-proc closeRelayProcess(controller: LiveSessionController) =
-  if controller.relayProcess != nil:
-    close(controller.relayProcess)
+proc refreshProcessStateLocked(controller: LiveSessionController) =
+  if controller.relayProcess.isNil:
+    return
+  if controller.state.mode != "ffmpeg-copy":
+    return
+  if controller.state.running and not controller.relayProcess.running():
+    let code = controller.relayProcess.waitForExit()
+    controller.relayProcess.close()
     controller.relayProcess = nil
-
-proc refreshRelayStateLocked(controller: LiveSessionController) =
-  ## Update state if the relay process exited since the last API call.
-  if controller.relayProcess == nil:
-    return
-  if running(controller.relayProcess):
-    return
-
-  let exitCode = waitForExit(controller.relayProcess)
-  closeRelayProcess(controller)
-  controller.state.lastExitCode = exitCode
-  controller.state.running = false
-  controller.state.relayPid = 0
-  if controller.state.status == "running":
-    controller.state.status = if exitCode == 0: "stopped" else: "error"
-    controller.state.message = &"live relay exited with code {exitCode}"
+    controller.state.lastExitCode = code
+    controller.state.status = "error"
+    controller.state.running = false
+    controller.state.message = &"ffmpeg copy relay exited with code {code}"
     controller.state.stoppedAt = utcStamp()
 
-proc terminateRelayLocked(controller: LiveSessionController) =
-  if controller.relayProcess == nil:
-    return
+proc runPathctl(controller: LiveSessionController; args: seq[string]): PathctlResult =
+  if not fileExists(controller.pathctlPath):
+    return PathctlResult(
+      ok: false,
+      message: &"mediamtx-pathctl not found: {controller.pathctlPath}",
+      exitCode: 127
+    )
 
-  if running(controller.relayProcess):
-    terminate(controller.relayProcess)
-    let code = waitForExit(controller.relayProcess, 1500)
-    if code == -1 and running(controller.relayProcess):
-      kill(controller.relayProcess)
-      discard waitForExit(controller.relayProcess)
+  var process: Process
+  try:
+    process = startProcess(
+      controller.pathctlPath,
+      args = args,
+      options = {poUsePath, poStdErrToStdOut}
+    )
+    let output = process.outputStream.readAll().strip()
+    let code = process.waitForExit()
+    process.close()
+    process = nil
+
+    result.exitCode = code
+    result.message = output
+    result.ok = code == 0
+  except CatchableError as e:
+    if process != nil:
+      process.close()
+    result = PathctlResult(ok: false, message: e.msg, exitCode: -1)
+
+proc deleteOutputPath(controller: LiveSessionController; outputPath: string): PathctlResult =
+  result = controller.runPathctl(@["delete", outputPath])
+  if not result.ok:
+    let lower = result.message.toLowerAscii()
+    if "404" in lower or "not found" in lower:
+      result.ok = true
+      result.message = "path was already absent"
+      result.exitCode = 0
+
+proc ffmpegCopyArgs(inputRtsp, outputRtsp: string): seq[string] =
+  @[
+    "-nostdin",
+    "-hide_banner",
+    "-loglevel", "warning",
+    "-rtsp_transport", "tcp",
+    "-fflags", "nobuffer",
+    "-flags", "low_delay",
+    "-i", inputRtsp,
+    "-an",
+    "-c:v", "copy",
+    "-rtsp_transport", "tcp",
+    "-f", "rtsp",
+    outputRtsp
+  ]
+
+proc startFfmpegCopyRelayLocked(
+    controller: LiveSessionController;
+    slot: CameraSlot;
+    inputRtsp, outputPath, outputRtsp: string
+  ) =
+  if controller.ffmpegPath.contains("/") and not fileExists(controller.ffmpegPath):
+    raise newException(IOError, &"ffmpeg not found: {controller.ffmpegPath}")
+
+  discard controller.deleteOutputPath(outputPath)
+
+  let args = ffmpegCopyArgs(inputRtsp, outputRtsp)
+  controller.state = LiveSessionState(
+    status: "starting",
+    running: false,
+    mode: "ffmpeg-copy",
+    selectedCameraId: slot.id,
+    selectedCameraName: slot.name,
+    inputMediamtxPath: slot.mediamtxPath,
+    inputRtspUrl: inputRtsp,
+    outputMediamtxPath: outputPath,
+    outputRtspUrl: outputRtsp,
+    aiWebrtcPath: &"/{outputPath}",
+    relayPid: 0,
+    relayCommand: controller.ffmpegPath,
+    relayArgs: args,
+    lastExitCode: 0,
+    message: &"starting ffmpeg copy relay: /{slot.mediamtxPath} -> /{outputPath}",
+    startedAt: utcStamp(),
+    stoppedAt: ""
+  )
+
+  try:
+    controller.relayProcess = startProcess(
+      controller.ffmpegPath,
+      args = args,
+      options = {poUsePath, poParentStreams}
+    )
+    controller.state.relayPid = controller.relayProcess.processID()
+    controller.state.status = "running"
+    controller.state.running = true
+    controller.state.message = &"ffmpeg copy relay is publishing /{slot.mediamtxPath} to /{outputPath}; inference worker is not connected yet"
+  except CatchableError as e:
+    if controller.relayProcess != nil:
+      controller.relayProcess.close()
+      controller.relayProcess = nil
+    controller.state.status = "error"
+    controller.state.running = false
+    controller.state.lastExitCode = -1
+    controller.state.message = &"failed to start ffmpeg copy relay: {e.msg}"
+    controller.state.stoppedAt = utcStamp()
+
+proc startMediamtxProxyRelayLocked(
+    controller: LiveSessionController;
+    slot: CameraSlot;
+    inputRtsp, outputPath, outputRtsp: string
+  ) =
+  let args = @[
+    "set",
+    outputPath,
+    &"--source:{inputRtsp}",
+    "--transport:tcp",
+    "--on-demand"
+  ]
+
+  discard controller.deleteOutputPath(outputPath)
+
+  controller.state = LiveSessionState(
+    status: "starting",
+    running: false,
+    mode: "mediamtx-proxy",
+    selectedCameraId: slot.id,
+    selectedCameraName: slot.name,
+    inputMediamtxPath: slot.mediamtxPath,
+    inputRtspUrl: inputRtsp,
+    outputMediamtxPath: outputPath,
+    outputRtspUrl: outputRtsp,
+    aiWebrtcPath: &"/{outputPath}",
+    relayPid: 0,
+    relayCommand: controller.pathctlPath,
+    relayArgs: args,
+    lastExitCode: 0,
+    message: &"configuring MediaMTX proxy: /{slot.mediamtxPath} -> /{outputPath}",
+    startedAt: utcStamp(),
+    stoppedAt: ""
+  )
+
+  let res = controller.runPathctl(args)
+  controller.state.lastExitCode = res.exitCode
+  controller.state.message = res.message
+
+  if res.ok:
+    controller.state.status = "running"
+    controller.state.running = true
+    controller.state.message = &"MediaMTX is proxying /{slot.mediamtxPath} to /{outputPath}; inference worker is not connected yet"
   else:
-    discard waitForExit(controller.relayProcess)
-  closeRelayProcess(controller)
+    controller.state.status = "error"
+    controller.state.running = false
+    controller.state.mode = "none"
+    controller.state.message = &"failed to configure /{outputPath}: {res.message}"
+    controller.state.stoppedAt = utcStamp()
 
 proc newLiveSessionController*(
     rtspBaseUrl = defaultRtspBaseUrl;
-    relayBinary = defaultRelayBinary;
-    relayLogLevel = defaultRelayLogLevel
+    pathctlPath = defaultPathctlPath;
+    ffmpegPath = defaultFfmpegPath;
+    sessionMode = defaultSessionMode
   ): LiveSessionController =
   new(result)
   initLock(result.lock)
   result.rtspBaseUrl = normalizeBaseUrl(rtspBaseUrl)
-  result.relayBinary = sanitizeRelayBinary(relayBinary)
-  result.relayLogLevel = sanitizeRelayLogLevel(relayLogLevel)
+  result.pathctlPath = sanitizeExecutablePath(pathctlPath, defaultPathctlPath)
+  result.ffmpegPath = sanitizeExecutablePath(ffmpegPath, defaultFfmpegPath)
+  result.sessionMode = normalizeSessionMode(sessionMode)
   result.relayProcess = nil
   result.state = defaultState(result.rtspBaseUrl)
-
-proc close*(controller: LiveSessionController) =
-  if controller != nil:
-    {.cast(gcsafe).}:
-      withLock controller.lock:
-        terminateRelayLocked(controller)
-    deinitLock(controller.lock)
 
 proc sessionJson*(controller: LiveSessionController): string {.gcsafe.} =
   {.cast(gcsafe).}:
     withLock controller.lock:
-      refreshRelayStateLocked(controller)
+      controller.refreshProcessStateLocked()
       result = pretty(sessionToJson(controller.state)) & "\n"
 
 proc currentState*(controller: LiveSessionController): LiveSessionState {.gcsafe.} =
   {.cast(gcsafe).}:
     withLock controller.lock:
-      refreshRelayStateLocked(controller)
+      controller.refreshProcessStateLocked()
       result = controller.state
+
+proc stopProcessLocked(controller: LiveSessionController) =
+  if controller.relayProcess.isNil:
+    return
+  try:
+    if controller.relayProcess.running():
+      controller.relayProcess.terminate()
+      discard controller.relayProcess.waitForExit()
+    else:
+      discard controller.relayProcess.waitForExit()
+  except CatchableError:
+    try:
+      controller.relayProcess.kill()
+      discard controller.relayProcess.waitForExit()
+    except CatchableError:
+      discard
+  try:
+    controller.relayProcess.close()
+  except CatchableError:
+    discard
+  controller.relayProcess = nil
 
 proc startSession*(
     controller: LiveSessionController;
@@ -248,65 +381,19 @@ proc startSession*(
     let inputRtsp = mediaPathUrl(controller.rtspBaseUrl, slot.mediamtxPath)
     let outputPath = target.aiMediamtxPath.strip(chars = {'/'})
     let outputRtsp = mediaPathUrl(controller.rtspBaseUrl, outputPath)
-    let args = buildRelayArgs(inputRtsp, outputRtsp, controller.relayLogLevel)
 
     withLock controller.lock:
-      refreshRelayStateLocked(controller)
-      terminateRelayLocked(controller)
+      controller.refreshProcessStateLocked()
+      controller.stopProcessLocked()
+      discard controller.deleteOutputPath(outputPath)
 
-      controller.state = LiveSessionState(
-        status: "starting",
-        running: false,
-        mode: "ffmpeg-copy-relay",
-        selectedCameraId: slot.id,
-        selectedCameraName: slot.name,
-        inputMediamtxPath: slot.mediamtxPath,
-        inputRtspUrl: inputRtsp,
-        outputMediamtxPath: outputPath,
-        outputRtspUrl: outputRtsp,
-        aiWebrtcPath: &"/{outputPath}",
-        relayPid: 0,
-        relayCommand: controller.relayBinary,
-        relayArgs: args,
-        lastExitCode: 0,
-        message: &"starting live relay: {slot.mediamtxPath} -> {outputPath}",
-        startedAt: utcStamp(),
-        stoppedAt: ""
-      )
+      case controller.sessionMode
+      of "ffmpeg-copy":
+        controller.startFfmpegCopyRelayLocked(slot, inputRtsp, outputPath, outputRtsp)
+      else:
+        controller.startMediamtxProxyRelayLocked(slot, inputRtsp, outputPath, outputRtsp)
 
-      try:
-        controller.relayProcess = startProcess(
-          controller.relayBinary,
-          args = args,
-          options = {poUsePath, poParentStreams}
-        )
-      except CatchableError as e:
-        controller.state.status = "error"
-        controller.state.running = false
-        controller.state.mode = "none"
-        controller.state.message = &"failed to start live relay command '{controller.relayBinary}': {e.msg}"
-        controller.state.stoppedAt = utcStamp()
-        result = controller.state
-
-      if controller.relayProcess != nil:
-        controller.state.relayPid = processID(controller.relayProcess)
-        sleep(250)
-
-        if not running(controller.relayProcess):
-          let exitCode = waitForExit(controller.relayProcess)
-          closeRelayProcess(controller)
-          controller.state.lastExitCode = exitCode
-          controller.state.status = "error"
-          controller.state.running = false
-          controller.state.relayPid = 0
-          controller.state.message = &"live relay failed immediately with code {exitCode}"
-          controller.state.stoppedAt = utcStamp()
-          result = controller.state
-        else:
-          controller.state.status = "running"
-          controller.state.running = true
-          controller.state.message = &"live relay is publishing /{slot.mediamtxPath} to /{outputPath}; inference worker is not connected yet"
-          result = controller.state
+      result = controller.state
 
     if result.running:
       targetStore.setPipelineState("running", true, result.message)
@@ -319,19 +406,29 @@ proc stopSession*(controller: LiveSessionController; targetStore: LiveTargetStor
       raise newException(ValueError, "live session controller is not initialized")
 
     withLock controller.lock:
-      terminateRelayLocked(controller)
-      markStoppedLocked(controller, "live relay is stopped")
+      controller.stopProcessLocked()
+      let outputPath = if controller.state.outputMediamtxPath.len > 0: controller.state.outputMediamtxPath else: defaultAiMediamtxPath
+      let res = controller.deleteOutputPath(outputPath)
+      if res.ok:
+        markStoppedLocked(controller, "live session is stopped")
+      else:
+        markStoppedLocked(controller, &"failed to delete /{outputPath}: {res.message}", "error")
+      controller.state.lastExitCode = res.exitCode
       result = controller.state
 
     if targetStore != nil:
-      targetStore.setPipelineState("stopped", false, "live relay is stopped")
+      targetStore.setPipelineState(result.status, result.running, result.message)
+
+proc close*(controller: LiveSessionController) =
+  if controller != nil:
+    discard controller.stopSession()
+    deinitLock(controller.lock)
 
 proc prepareSession*(
     controller: LiveSessionController;
     cameras: LiveCameraStore;
     targetStore: LiveTargetStore
   ): LiveSessionState {.gcsafe.} =
-  ## Backward-compatible name used by the existing HTTP handler.
   result = controller.startSession(cameras, targetStore)
 
 proc prepareSessionJson*(

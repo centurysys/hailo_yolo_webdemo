@@ -28,12 +28,14 @@ when isMainModule:
     echo "removed old job directories at startup: ", removedOldJobDirs
 
   let jobStore = newJobStore()
-  let cameraStore = newLiveCameraStore(liveCameraConfigPath, mediamtxPathctlPath)
+  let pathctlPath = getMediamtxPathctlPath()
+  let cameraStore = newLiveCameraStore(liveCameraConfigPath, pathctlPath)
   let targetStore = newLiveTargetStore(liveTargetConfigPath)
   let sessionController = newLiveSessionController(
     liveRtspBaseUrl,
-    getLiveRelayBinary(),
-    getLiveRelayLogLevel()
+    pathctlPath,
+    getLiveFfmpegPath(),
+    getLiveSessionMode()
   )
   let syncResults = cameraStore.syncEnabledCameras()
   for item in syncResults:
@@ -51,8 +53,9 @@ when isMainModule:
   echo "cameraConfigPath: ", liveCameraConfigPath
   echo "liveTargetConfigPath: ", liveTargetConfigPath
   echo "liveRtspBaseUrl: ", liveRtspBaseUrl
-  echo "liveRelayBinary: ", getLiveRelayBinary()
-  echo "liveRelayLogLevel: ", getLiveRelayLogLevel()
+  echo "liveSessionMode: ", getLiveSessionMode()
+  echo "liveFfmpeg: ", getLiveFfmpegPath()
+  echo "mediamtxPathctl: ", pathctlPath
 
   try:
     startServer(jobStore, cameraStore, targetStore, sessionController)

@@ -22,19 +22,25 @@ const
   liveTargetConfigPath* = stateRoot & "/live-target.json"
   mediamtxPathctlPath* = "/usr/local/sbin/mediamtx-pathctl"
   liveRtspBaseUrl* = "rtsp://127.0.0.1:8554"
-  defaultLiveRelayBinary* = "ffmpeg"
-  defaultLiveRelayLogLevel* = "warning"
+  liveFfmpegPath* = "/usr/bin/ffmpeg"
+  liveSessionMode* = "mediamtx-proxy"
 
   hefPath* = "/usr/local/share/hailo-demo/yolov11s.hef"
   fontPath* = "/usr/share/fonts/dejavu/DejaVuSans.ttf"
 
   maxJobsToKeep* = 20
 
-proc getLiveRelayBinary*(): string =
-  result = getEnv("HAILO_DEMO_LIVE_RELAY_BIN", defaultLiveRelayBinary)
+proc getMediamtxPathctlPath*(): string =
+  result = getEnv("HAILO_DEMO_MEDIAMTX_PATHCTL", mediamtxPathctlPath)
 
-proc getLiveRelayLogLevel*(): string =
-  result = getEnv("HAILO_DEMO_LIVE_RELAY_LOG_LEVEL", defaultLiveRelayLogLevel)
+proc getLiveFfmpegPath*(): string =
+  result = getEnv("HAILO_DEMO_LIVE_FFMPEG", liveFfmpegPath)
+
+proc getLiveSessionMode*(): string =
+  ## mediamtx-proxy keeps the proven zero-process relay as the safe default.
+  ## Set HAILO_DEMO_LIVE_SESSION_MODE=ffmpeg-copy to exercise a long-running
+  ## RTSP read/publish relay process before wiring in the real inference worker.
+  result = getEnv("HAILO_DEMO_LIVE_SESSION_MODE", liveSessionMode)
 
 proc getListenHost*(): string =
   ## Read at server startup time, not as a module-global let, so rebuild/run
