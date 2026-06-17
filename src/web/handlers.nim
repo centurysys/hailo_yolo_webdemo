@@ -6,6 +6,8 @@ import std/[json, options, os, strformat, strutils, uri]
 import ../config
 import ../jobs/[runner, store]
 import ../live/cameras
+import ../live/live_target
+import ../live/live_session
 import ../types
 import ../util/[ids, paths]
 import ./pages
@@ -13,6 +15,8 @@ import ./api
 
 var gStorePtr: pointer
 var gCameraStorePtr: pointer
+var gTargetStorePtr: pointer
+var gSessionControllerPtr: pointer
 
 proc setJobStore*(store: JobStore) =
   ## Keep only an untraced pointer in global state so Mummy handler procs stay
@@ -35,6 +39,20 @@ proc setLiveCameraStore*(store: LiveCameraStore) =
 proc currentCameraStore(): LiveCameraStore {.gcsafe.} =
   {.cast(gcsafe).}:
     result = cast[LiveCameraStore](gCameraStorePtr)
+
+proc setLiveTargetStore*(store: LiveTargetStore) =
+  gTargetStorePtr = cast[pointer](store)
+
+proc currentLiveTargetStore(): LiveTargetStore {.gcsafe.} =
+  {.cast(gcsafe).}:
+    result = cast[LiveTargetStore](gTargetStorePtr)
+
+proc setLiveSessionController*(controller: LiveSessionController) =
+  gSessionControllerPtr = cast[pointer](controller)
+
+proc currentLiveSessionController(): LiveSessionController {.gcsafe.} =
+  {.cast(gcsafe).}:
+    result = cast[LiveSessionController](gSessionControllerPtr)
 
 proc respondText(request: Request, status: int, text: string) {.gcsafe.} =
   var headers: HttpHeaders
@@ -165,8 +183,56 @@ proc outputFilename(job: JobInfo): string =
   else:
     "output" & job.kind.extension
 
+proc liveSessionConflictMessage(): string {.gcsafe.} =
+  ## File upload jobs and live sessions both use the same HAILO device in the
+  ## compact demo.  Keep the policy simple: while the live session is running,
+  ## reject new file jobs instead of queueing work that cannot run safely.
+  let session = currentLiveSessionController()
+  if session == nil:
+    return ""
+
+  try:
+    let state = session.currentState()
+    if state.running:
+      let cam =
+        if state.selectedCameraName.len > 0: state.selectedCameraName
+        elif state.selectedCameraId.len > 0: state.selectedCameraId
+        else: "selected camera"
+      return &"live session is running for {cam}; stop Live preview before running file inference"
+  except CatchableError as e:
+    return &"failed to check live session state: {e.msg}"
+
+proc activeJobConflictMessage(store: JobStore): string {.gcsafe.} =
+  ## Starting the live session while a file job is queued/running would contend
+  ## for HAILO.  Reject live start until the current job finishes.
+  if store == nil:
+    return ""
+
+  let maybeJob = store.firstActiveJob()
+  if maybeJob.isNone:
+    return ""
+
+  let job = maybeJob.get
+  &"file inference job {job.id} is {job.status.toWire}; wait for it to finish before starting Live preview"
+
+proc cleanupNginxUploadTemp(request: Request) {.gcsafe.} =
+  ## If nginx has already stored the upload and passed it through X-FILE, do not
+  ## leave the temporary file behind when rejecting the request with 409.
+  let nginxFile = getHeader(request, "X-FILE")
+  if nginxFile.len == 0:
+    return
+
+  try:
+    if fileExists(nginxFile):
+      removeFile(nginxFile)
+  except CatchableError as e:
+    echo &"warning: failed to remove rejected upload temp file {nginxFile}: {e.msg}"
+
 proc handleIndex*(request: Request) {.gcsafe.} =
   request.respondHtml(200, renderIndexPage())
+
+proc handleLive*(request: Request) {.gcsafe.} =
+  request.respondHtml(200, renderLivePage())
 
 proc respondAsset(request: Request; contentType, body: string) {.gcsafe.} =
   var headers: HttpHeaders
@@ -179,6 +245,9 @@ proc handleDemoCss*(request: Request) {.gcsafe.} =
 
 proc handleIndexJs*(request: Request) {.gcsafe.} =
   request.respondAsset("application/javascript; charset=utf-8", indexJs())
+
+proc handleLiveJs*(request: Request) {.gcsafe.} =
+  request.respondAsset("application/javascript; charset=utf-8", liveJs())
 
 proc handleWaitJs*(request: Request) {.gcsafe.} =
   request.respondAsset("application/javascript; charset=utf-8", waitJs())
@@ -197,6 +266,12 @@ proc handleUpload*(request: Request) {.gcsafe.} =
   let store = currentStore()
   if store == nil:
     request.respondText(500, "job store is not initialized")
+    return
+
+  let liveConflict = liveSessionConflictMessage()
+  if liveConflict.len > 0:
+    request.cleanupNginxUploadTemp()
+    request.respondText(409, liveConflict)
     return
 
   try:
@@ -292,9 +367,108 @@ proc handleApiLiveCameraDelete*(request: Request) {.gcsafe.} =
     return
 
   try:
-    request.respondJson(200, store.deleteCameraJson(cameraId))
+    let body = store.deleteCameraJson(cameraId)
+    let targetStore = currentLiveTargetStore()
+    if targetStore != nil:
+      targetStore.clearIfSelected(cameraId)
+    let session = currentLiveSessionController()
+    if session != nil:
+      discard session.stopSession(targetStore)
+    request.respondJson(200, body)
   except ValueError as e:
     request.respondText(400, e.msg)
+  except CatchableError as e:
+    request.respondText(500, e.msg)
+
+proc handleApiLiveTarget*(request: Request) {.gcsafe.} =
+  let store = currentLiveTargetStore()
+  if store == nil:
+    request.respondText(500, "live target store is not initialized")
+    return
+
+  request.respondJson(200, store.targetJson())
+
+proc handleApiLiveTargetSet*(request: Request) {.gcsafe.} =
+  let targetStore = currentLiveTargetStore()
+  let cameraStore = currentCameraStore()
+  if targetStore == nil:
+    request.respondText(500, "live target store is not initialized")
+    return
+  if cameraStore == nil:
+    request.respondText(500, "live camera store is not initialized")
+    return
+
+  let cameraId = trailingPathSegment(request.path, "/api/live/target/")
+  if cameraId.len == 0:
+    request.respondText(404, "missing camera id")
+    return
+
+  try:
+    request.respondJson(200, targetStore.selectTargetJson(cameraStore, cameraId))
+  except ValueError as e:
+    request.respondText(400, e.msg)
+  except CatchableError as e:
+    request.respondText(500, e.msg)
+
+proc handleApiLiveTargetClear*(request: Request) {.gcsafe.} =
+  let store = currentLiveTargetStore()
+  if store == nil:
+    request.respondText(500, "live target store is not initialized")
+    return
+
+  try:
+    let session = currentLiveSessionController()
+    if session != nil:
+      discard session.stopSession(store)
+    request.respondJson(200, store.clearTargetJson())
+  except CatchableError as e:
+    request.respondText(500, e.msg)
+
+proc handleApiLiveSession*(request: Request) {.gcsafe.} =
+  let session = currentLiveSessionController()
+  if session == nil:
+    request.respondText(500, "live session controller is not initialized")
+    return
+
+  request.respondJson(200, session.sessionJson())
+
+proc handleApiLiveSessionStart*(request: Request) {.gcsafe.} =
+  let session = currentLiveSessionController()
+  let cameraStore = currentCameraStore()
+  let targetStore = currentLiveTargetStore()
+  if session == nil:
+    request.respondText(500, "live session controller is not initialized")
+    return
+  if cameraStore == nil:
+    request.respondText(500, "live camera store is not initialized")
+    return
+  if targetStore == nil:
+    request.respondText(500, "live target store is not initialized")
+    return
+
+  let jobStore = currentStore()
+  if jobStore != nil:
+    let jobConflict = activeJobConflictMessage(jobStore)
+    if jobConflict.len > 0:
+      request.respondText(409, jobConflict)
+      return
+
+  try:
+    request.respondJson(200, session.prepareSessionJson(cameraStore, targetStore))
+  except ValueError as e:
+    request.respondText(400, e.msg)
+  except CatchableError as e:
+    request.respondText(500, e.msg)
+
+proc handleApiLiveSessionStop*(request: Request) {.gcsafe.} =
+  let session = currentLiveSessionController()
+  let targetStore = currentLiveTargetStore()
+  if session == nil:
+    request.respondText(500, "live session controller is not initialized")
+    return
+
+  try:
+    request.respondJson(200, session.stopSessionJson(targetStore))
   except CatchableError as e:
     request.respondText(500, e.msg)
 

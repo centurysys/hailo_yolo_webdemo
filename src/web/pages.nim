@@ -11,11 +11,13 @@ import ../types
 const moduleDir = currentSourcePath().splitFile.dir
 const layoutTemplate = staticRead(moduleDir / "templates" / "layout.html")
 const indexTemplate = staticRead(moduleDir / "templates" / "index.html")
+const liveTemplate = staticRead(moduleDir / "templates" / "live.html")
 const waitTemplate = staticRead(moduleDir / "templates" / "wait.html")
 const resultTemplate = staticRead(moduleDir / "templates" / "result.html")
 const errorTemplate = staticRead(moduleDir / "templates" / "error.html")
 const demoCssContent = staticRead(moduleDir / "static" / "demo.css")
 const indexJsContent = staticRead(moduleDir / "static" / "index.js")
+const liveJsContent = staticRead(moduleDir / "static" / "live.js")
 const waitJsContent = staticRead(moduleDir / "static" / "wait.js")
 const resultViewerJsContent = staticRead(moduleDir / "static" / "result-viewer.js")
 
@@ -40,6 +42,7 @@ proc scriptTag(path: string): string =
 
 proc demoCss*(): string = demoCssContent
 proc indexJs*(): string = indexJsContent
+proc liveJs*(): string = liveJsContent
 proc waitJs*(): string = waitJsContent
 proc resultViewerJs*(): string = resultViewerJsContent
 
@@ -51,6 +54,9 @@ proc renderLayout*(title, body: string; scriptPath = ""): string =
 
 proc renderIndexPage*(): string =
   renderLayout("HAILO YOLO Web Demo", indexTemplate, "/static/index.js")
+
+proc renderLivePage*(): string =
+  renderLayout("Live camera preview", liveTemplate, "/static/live.js")
 
 proc renderWaitPage*(jobId: string): string =
   let safeJobId = jobId.htmlEscape

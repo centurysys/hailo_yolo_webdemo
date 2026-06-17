@@ -8,18 +8,34 @@ import mummy, mummy/routers
 import ../config
 import ../jobs/store
 import ../live/cameras
+import ../live/live_session
+import ../live/live_target
 import ./handlers
 
-proc startServer*(jobStore: JobStore; cameraStore: LiveCameraStore) =
+proc startServer*(
+    jobStore: JobStore;
+    cameraStore: LiveCameraStore;
+    targetStore: LiveTargetStore;
+    sessionController: LiveSessionController
+  ) =
   setJobStore(jobStore)
   setLiveCameraStore(cameraStore)
+  setLiveTargetStore(targetStore)
+  setLiveSessionController(sessionController)
 
   var router: Router
   router.get("/", handleIndex)
+  router.get("/live", handleLive)
   router.put("/upload", handleUpload)
   router.get("/wait/*", handleWait)
   router.get("/api/jobs/*", handleApiJob)
   router.get("/api/live/cameras", handleApiLiveCameras)
+  router.get("/api/live/target", handleApiLiveTarget)
+  router.put("/api/live/target/*", handleApiLiveTargetSet)
+  router.delete("/api/live/target", handleApiLiveTargetClear)
+  router.get("/api/live/session", handleApiLiveSession)
+  router.post("/api/live/session/start", handleApiLiveSessionStart)
+  router.post("/api/live/session/stop", handleApiLiveSessionStop)
   router.put("/api/live/cameras/*", handleApiLiveCameraSet)
   router.delete("/api/live/cameras/*", handleApiLiveCameraDelete)
   router.get("/result/*", handleResult)
@@ -27,6 +43,7 @@ proc startServer*(jobStore: JobStore; cameraStore: LiveCameraStore) =
   router.get("/files/*", handleFile)
   router.get("/static/demo.css", handleDemoCss)
   router.get("/static/index.js", handleIndexJs)
+  router.get("/static/live.js", handleLiveJs)
   router.get("/static/wait.js", handleWaitJs)
   router.get("/static/result-viewer.js", handleResultViewerJs)
   router.get("/static/pico.min.css", handleMissingPico)

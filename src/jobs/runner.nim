@@ -8,7 +8,7 @@
 ## plane aligned with the same move-oriented infrastructure used by hailort_nim's
 ## internal detector worker.
 
-import std/[options, os, strformat]
+import std/[options, os, strformat, strutils]
 
 import threadtools
 
@@ -19,7 +19,19 @@ import ../types
 import ../util/paths
 import ./store
 
-const DefaultJobQueueSize = 16
+const
+  DefaultJobQueueSize = 16
+  EnvPreloadHailoWorker = "HAILO_DEMO_PRELOAD_HAILO_WORKER"
+
+proc preloadHailoAtStartup(): bool =
+  ## In the compact demo the live worker may temporarily own HAILO from a
+  ## different thread.  Keep startup preload disabled by default so HailoRT
+  ## objects are opened from the thread that actually runs the current job or
+  ## live session.  Set HAILO_DEMO_PRELOAD_HAILO_WORKER=1 to restore the old
+  ## preload behavior for file-only demos.
+  let raw = getEnv(EnvPreloadHailoWorker, "").strip().toLowerAscii()
+  result = raw in ["1", "true", "yes", "on"]
+
 
 type
   JobRequestKind = enum
@@ -140,15 +152,18 @@ proc jobRunnerMain(state: ptr JobRunnerState) {.thread.} =
   let store = cast[JobStore](state.storePtr)
 
   try:
-    try:
-      {.cast(gcsafe).}:
-        preloadHailoWorker()
-      echo "HAILO detector preloaded in job worker thread"
-    except CatchableError as e:
-      ## Keep the web UI usable in development environments without HAILO.
-      ## The first JPEG job will retry Detector.open() and then fail with a
-      ## job-specific error if the device/HEF is still unavailable.
-      echo &"warning: failed to preload HAILO detector: {e.msg}"
+    if preloadHailoAtStartup():
+      try:
+        {.cast(gcsafe).}:
+          preloadHailoWorker()
+        echo "HAILO detector preloaded in job worker thread"
+      except CatchableError as e:
+        ## Keep the web UI usable in development environments without HAILO.
+        ## The first JPEG job will retry Detector.open() and then fail with a
+        ## job-specific error if the device/HEF is still unavailable.
+        echo &"warning: failed to preload HAILO detector: {e.msg}"
+    else:
+      echo "HAILO detector startup preload disabled"
 
     while true:
       var recvRes = state.queue.receiveResult()
@@ -162,6 +177,19 @@ proc jobRunnerMain(state: ptr JobRunnerState) {.thread.} =
       of jrkRun:
         store.processJob(req.jobId)
         store.cleanupOldJobDirs(req.jobId)
+
+        ## Release HAILO after each file job.  The live demo runs file jobs and
+        ## live sessions in the same process but different threads; keeping
+        ## HailoRT objects permanently owned by the job thread makes later live
+        ## sessions cross thread ownership boundaries.  Reopening per file job
+        ## is slightly slower for the next upload, but it keeps the compact
+        ## demo's HAILO ownership simple and avoids crashes when stopping a
+        ## live session after in-process inference monitoring.
+        try:
+          {.cast(gcsafe).}:
+            closeHailoWorker()
+        except CatchableError as e:
+          echo &"warning: failed to release HAILO after job {req.jobId}: {e.msg}"
   finally:
     {.cast(gcsafe).}:
       closeHailoWorker()

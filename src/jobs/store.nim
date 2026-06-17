@@ -99,6 +99,25 @@ proc setDone*(
 proc setFailed*(store: JobStore, id: string, message: string) =
   store.updateJob(id, jsFailed, 100, message)
 
+proc firstActiveJob*(store: JobStore): Option[JobInfo] =
+  ## Return one queued/running job, if any.
+  ##
+  ## The live demo uses a single HAILO device.  File jobs and the live worker
+  ## should not run inference at the same time, so the live-session start
+  ## handler uses this as a lightweight guard.
+  if store.isNil:
+    return none(JobInfo)
+
+  withLock store.lock:
+    for _, job in store.jobs:
+      if job.status in {jsQueued, jsRunning}:
+        return some(job)
+
+  none(JobInfo)
+
+proc hasActiveJobs*(store: JobStore): bool =
+  result = store.firstActiveJob().isSome
+
 proc listJobs*(store: JobStore): seq[JobInfo] =
   withLock store.lock:
     for _, job in store.jobs:

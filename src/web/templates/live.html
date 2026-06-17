@@ -1,0 +1,113 @@
+<section class="live-page" id="live-page">
+  <div class="live-page-header">
+    <div>
+      <h2>Live camera preview</h2>
+      <p class="muted">左の4枠にRTSPカメラを登録して raw WebRTC preview を表示し、右側で選択中カメラのAI preview枠を確認します。</p>
+    </div>
+    <button id="refresh-cameras" class="secondary" type="button">Refresh</button>
+  </div>
+
+  <div id="live-message" class="live-message muted" role="status"></div>
+
+  <div class="live-layout">
+    <section class="raw-preview-panel" aria-labelledby="raw-preview-title">
+      <div class="panel-heading">
+        <h3 id="raw-preview-title">Raw camera previews</h3>
+        <span class="muted">MediaMTX /cam1〜/cam4</span>
+      </div>
+      <div id="camera-grid" class="camera-grid" aria-live="polite"></div>
+    </section>
+
+    <aside class="ai-preview-panel" aria-labelledby="ai-preview-title">
+      <div class="panel-heading">
+        <h3 id="ai-preview-title">Selected AI preview</h3>
+        <span id="selected-camera-badge" class="status-pill">not selected</span>
+      </div>
+
+      <div id="ai-preview-box" class="ai-preview-box">
+        <div class="ai-preview-placeholder">
+          <strong>/cam-ai</strong>
+          <span class="muted">推論パイプライン接続後に、選択中カメラの overlay stream を表示します。</span>
+        </div>
+      </div>
+
+      <div class="session-actions" aria-label="Live inference session controls">
+        <button id="session-start" type="button">Start AI relay</button>
+        <button id="session-stop" class="secondary" type="button">Stop</button>
+      </div>
+
+      <dl class="live-status-list">
+        <div>
+          <dt>Selected camera</dt>
+          <dd id="selected-camera-name">None</dd>
+        </div>
+        <div>
+          <dt>Raw WebRTC URL</dt>
+          <dd><a id="selected-webrtc-link" href="#" target="_blank" rel="noreferrer">not available</a></dd>
+        </div>
+        <div>
+          <dt>AI WebRTC URL</dt>
+          <dd><a id="ai-webrtc-link" href="#" target="_blank" rel="noreferrer">/cam-ai</a></dd>
+        </div>
+        <div>
+          <dt>Pipeline status</dt>
+          <dd id="ai-pipeline-status">stopped</dd>
+        </div>
+        <div>
+          <dt>Input RTSP</dt>
+          <dd id="session-input-rtsp" class="muted">not prepared</dd>
+        </div>
+        <div>
+          <dt>Output RTSP</dt>
+          <dd id="session-output-rtsp" class="muted">not prepared</dd>
+        </div>
+        <div>
+          <dt>Session message</dt>
+          <dd id="session-message" class="muted">not prepared</dd>
+        </div>
+      </dl>
+    </aside>
+  </div>
+
+  <dialog id="camera-dialog" class="camera-dialog">
+    <form id="camera-form" method="dialog">
+      <header class="dialog-header">
+        <h3 id="camera-dialog-title">Camera settings</h3>
+        <button id="camera-dialog-close" class="secondary icon-button" type="button" aria-label="Close">×</button>
+      </header>
+
+      <input id="camera-id" type="hidden">
+
+      <label>
+        Camera name
+        <input id="camera-name" type="text" autocomplete="off" placeholder="Camera 1">
+      </label>
+
+      <label>
+        RTSP source URL
+        <input id="camera-source" type="text" inputmode="url" autocomplete="off" placeholder="rtsp://user:pass@192.168.10.101/stream1">
+      </label>
+
+      <label>
+        RTSP transport
+        <select id="camera-transport">
+          <option value="tcp">tcp</option>
+          <option value="udp">udp</option>
+          <option value="multicast">multicast</option>
+          <option value="automatic">automatic</option>
+        </select>
+      </label>
+
+      <label class="checkbox-control dialog-checkbox">
+        <input id="camera-enabled" type="checkbox" checked>
+        <span>Enable MediaMTX path</span>
+      </label>
+
+      <div class="dialog-actions">
+        <button id="camera-save" type="submit">Save</button>
+        <button id="camera-delete" class="danger" type="button">Delete</button>
+        <button id="camera-cancel" class="secondary" type="button">Cancel</button>
+      </div>
+    </form>
+  </dialog>
+</section>

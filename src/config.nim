@@ -19,12 +19,43 @@ const
 
   stateRoot* = "/var/lib/hailo-demo"
   liveCameraConfigPath* = stateRoot & "/live-cameras.json"
+  liveTargetConfigPath* = stateRoot & "/live-target.json"
   mediamtxPathctlPath* = "/usr/local/sbin/mediamtx-pathctl"
+  liveRtspBaseUrl* = "rtsp://127.0.0.1:8554"
+  liveFfmpegPath* = "/usr/bin/ffmpeg"
+  liveExternalWorkerPath* = "/usr/local/bin/hailo-live-worker"
+  liveExternalWorkerArgs* = "--input {input} --output {output}"
+  liveSessionMode* = "in-process-ai"
 
   hefPath* = "/usr/local/share/hailo-demo/yolov11s.hef"
   fontPath* = "/usr/share/fonts/dejavu/DejaVuSans.ttf"
 
   maxJobsToKeep* = 20
+
+proc getMediamtxPathctlPath*(): string =
+  result = getEnv("HAILO_DEMO_MEDIAMTX_PATHCTL", mediamtxPathctlPath)
+
+proc getLiveFfmpegPath*(): string =
+  result = getEnv("HAILO_DEMO_LIVE_FFMPEG", liveFfmpegPath)
+
+proc getLiveExternalWorkerPath*(): string =
+  result = getEnv("HAILO_DEMO_LIVE_WORKER", liveExternalWorkerPath)
+
+proc getLiveExternalWorkerArgs*(): string =
+  result = getEnv("HAILO_DEMO_LIVE_WORKER_ARGS", liveExternalWorkerArgs)
+
+proc getLiveSessionMode*(): string =
+  ## The compact demo keeps the live worker inside the main web demo process by
+  ## default, so the UI/API, file inference path, and live session controller can
+  ## coordinate one HAILO device without an extra service process.
+  ##
+  ## Other modes are intentionally kept for comparison and bring-up:
+  ##   mediamtx-proxy   MediaMTX path proxy only
+  ##   ffmpeg-copy      external ffmpeg copy relay
+  ##   external-worker  configurable worker command
+  ##   in-process       internal ffmpeg-copy live worker thread
+  ##   in-process-ai    internal RTSP -> HAILO -> overlay -> RTSP publisher
+  result = getEnv("HAILO_DEMO_LIVE_SESSION_MODE", liveSessionMode)
 
 proc getListenHost*(): string =
   ## Read at server startup time, not as a module-global let, so rebuild/run
