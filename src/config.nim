@@ -17,6 +17,10 @@ const
   uploadDir* = workRoot & "/upload"
   jobsDir* = workRoot & "/jobs"
 
+  stateRoot* = "/var/lib/hailo-demo"
+  liveCameraConfigPath* = stateRoot & "/live-cameras.json"
+  mediamtxPathctlPath* = "/usr/local/sbin/mediamtx-pathctl"
+
   hefPath* = "/usr/local/share/hailo-demo/yolov11s.hef"
   fontPath* = "/usr/share/fonts/dejavu/DejaVuSans.ttf"
 

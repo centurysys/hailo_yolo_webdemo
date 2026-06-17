@@ -1,16 +1,18 @@
 ## HTTP handlers for Mummy.
 
 import mummy
-import std/[options, os, strformat, strutils, uri]
+import std/[json, options, os, strformat, strutils, uri]
 
 import ../config
 import ../jobs/[runner, store]
+import ../live/cameras
 import ../types
 import ../util/[ids, paths]
 import ./pages
 import ./api
 
 var gStorePtr: pointer
+var gCameraStorePtr: pointer
 
 proc setJobStore*(store: JobStore) =
   ## Keep only an untraced pointer in global state so Mummy handler procs stay
@@ -24,6 +26,15 @@ proc currentStore(): JobStore {.gcsafe.} =
   ## global; keep a raw pointer and cast it back only at this boundary.
   {.cast(gcsafe).}:
     result = cast[JobStore](gStorePtr)
+
+proc setLiveCameraStore*(store: LiveCameraStore) =
+  ## Same pattern as JobStore: keep GC-managed refs out of globals that are
+  ## accessed from GC-safe Mummy handlers.
+  gCameraStorePtr = cast[pointer](store)
+
+proc currentCameraStore(): LiveCameraStore {.gcsafe.} =
+  {.cast(gcsafe).}:
+    result = cast[LiveCameraStore](gCameraStorePtr)
 
 proc respondText(request: Request, status: int, text: string) {.gcsafe.} =
   var headers: HttpHeaders
@@ -240,6 +251,52 @@ proc handleApiJob*(request: Request) {.gcsafe.} =
     return
 
   request.respondJson(200, jobJson(maybeJob.get))
+
+proc handleApiLiveCameras*(request: Request) {.gcsafe.} =
+  let store = currentCameraStore()
+  if store == nil:
+    request.respondText(500, "live camera store is not initialized")
+    return
+
+  request.respondJson(200, store.camerasJson())
+
+proc handleApiLiveCameraSet*(request: Request) {.gcsafe.} =
+  let store = currentCameraStore()
+  if store == nil:
+    request.respondText(500, "live camera store is not initialized")
+    return
+
+  let cameraId = trailingPathSegment(request.path, "/api/live/cameras/")
+  if cameraId.len == 0:
+    request.respondText(404, "missing camera id")
+    return
+
+  try:
+    request.respondJson(200, store.setCameraJson(cameraId, request.body))
+  except ValueError as e:
+    request.respondText(400, e.msg)
+  except JsonParsingError as e:
+    request.respondText(400, e.msg)
+  except CatchableError as e:
+    request.respondText(500, e.msg)
+
+proc handleApiLiveCameraDelete*(request: Request) {.gcsafe.} =
+  let store = currentCameraStore()
+  if store == nil:
+    request.respondText(500, "live camera store is not initialized")
+    return
+
+  let cameraId = trailingPathSegment(request.path, "/api/live/cameras/")
+  if cameraId.len == 0:
+    request.respondText(404, "missing camera id")
+    return
+
+  try:
+    request.respondJson(200, store.deleteCameraJson(cameraId))
+  except ValueError as e:
+    request.respondText(400, e.msg)
+  except CatchableError as e:
+    request.respondText(500, e.msg)
 
 
 proc handlePreview*(request: Request) {.gcsafe.} =
