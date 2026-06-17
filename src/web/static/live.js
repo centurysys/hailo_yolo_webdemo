@@ -49,6 +49,9 @@ let liveSession = {
   stoppedAt: '',
 };
 
+let previewReloadSerial = 0;
+let previewResyncButton = null;
+
 function setMessage(text, isError = false) {
   liveMessage.textContent = text || '';
   liveMessage.classList.toggle('error', Boolean(isError));
@@ -59,6 +62,65 @@ function absoluteMediaUrl(port, path) {
   const scheme = location.protocol === 'https:' ? 'https:' : 'http:';
   const cleanPath = String(path || '').startsWith('/') ? path : '/' + String(path || '');
   return `${scheme}//${location.hostname}:${port}${cleanPath}`;
+}
+
+function withPreviewReloadToken(url, reason) {
+  const next = new URL(url, location.href);
+  previewReloadSerial += 1;
+  next.searchParams.set('hailoPreviewReload', `${Date.now()}-${previewReloadSerial}`);
+  if (reason) next.searchParams.set('hailoPreviewReason', reason);
+  return next.toString();
+}
+
+function createWebrtcPreviewFrame(baseUrl, title, extraClass = '') {
+  const frame = document.createElement('iframe');
+  frame.className = extraClass ? `webrtc-preview-frame ${extraClass}` : 'webrtc-preview-frame';
+  frame.src = baseUrl;
+  frame.dataset.baseSrc = baseUrl;
+  frame.title = title;
+  frame.loading = 'lazy';
+  frame.allow = 'autoplay; fullscreen; picture-in-picture';
+  return frame;
+}
+
+function reloadPreviewFrame(frame, reason) {
+  if (!frame) return false;
+  const baseSrc = frame.dataset.baseSrc || frame.src;
+  if (!baseSrc) return false;
+  frame.src = withPreviewReloadToken(baseSrc, reason);
+  return true;
+}
+
+function cssEscapeIdentifier(value) {
+  if (window.CSS && typeof window.CSS.escape === 'function') return window.CSS.escape(value);
+  return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+}
+
+function reloadSelectedRawPreview(reason) {
+  const cameraId = selectedCameraId();
+  if (!cameraId) return false;
+  const card = cameraGrid.querySelector(`[data-camera-id="${cssEscapeIdentifier(cameraId)}"]`);
+  if (!card) return false;
+  return reloadPreviewFrame(card.querySelector('iframe.webrtc-preview-frame'), reason || 'selected-raw');
+}
+
+function reloadAiPreview(reason) {
+  return reloadPreviewFrame(aiPreviewBox && aiPreviewBox.querySelector('iframe.webrtc-preview-frame'), reason || 'ai');
+}
+
+function resyncPreviewFrames(reason = 'manual') {
+  const rawReloaded = reloadSelectedRawPreview(`${reason}-raw`);
+  const aiReloaded = reloadAiPreview(`${reason}-ai`);
+  return { rawReloaded, aiReloaded };
+}
+
+function schedulePreviewResync(reason, delayMs) {
+  window.setTimeout(() => {
+    const result = resyncPreviewFrames(reason);
+    if (result.rawReloaded || result.aiReloaded) {
+      console.debug('live preview resync', reason, result);
+    }
+  }, delayMs);
 }
 
 function webrtcUrl(slot) {
@@ -99,12 +161,12 @@ function renderAiPreviewBox() {
 
   aiPreviewBox.replaceChildren();
   if (shouldEmbed) {
-    const frame = document.createElement('iframe');
-    frame.className = 'webrtc-preview-frame ai-preview-frame';
-    frame.src = aiWebrtcUrl();
-    frame.title = 'AI preview WebRTC stream';
-    frame.loading = 'lazy';
-    frame.allow = 'autoplay; fullscreen; picture-in-picture';
+    const frame = createWebrtcPreviewFrame(
+      aiWebrtcUrl(),
+      'AI preview WebRTC stream',
+      'ai-preview-frame'
+    );
+    frame.dataset.previewRole = 'ai';
     aiPreviewBox.appendChild(frame);
     return;
   }
@@ -200,12 +262,12 @@ function renderCameraCard(slot) {
     addButton.addEventListener('click', () => openCameraDialog(slot));
     preview.appendChild(addButton);
   } else {
-    const frame = document.createElement('iframe');
-    frame.className = 'webrtc-preview-frame';
-    frame.src = webrtcUrl(slot);
-    frame.title = `${slot.name || slot.id} WebRTC preview`;
-    frame.loading = 'lazy';
-    frame.allow = 'autoplay; fullscreen; picture-in-picture';
+    const frame = createWebrtcPreviewFrame(
+      webrtcUrl(slot),
+      `${slot.name || slot.id} WebRTC preview`
+    );
+    frame.dataset.previewRole = 'raw';
+    frame.dataset.cameraId = slot.id;
     preview.appendChild(frame);
   }
 
@@ -390,6 +452,7 @@ async function prepareSession() {
     liveSession = await res.json();
     await loadLiveTarget();
     updateSelectedPanel();
+    schedulePreviewResync('session-start', 1200);
     setMessage(liveSession.message || 'live AI relay started');
   } catch (err) {
     setMessage('error: ' + err.message, true);
@@ -409,6 +472,28 @@ async function stopSession() {
     setMessage('error: ' + err.message, true);
   }
 }
+
+
+function initPreviewResyncButton() {
+  if (!sessionStartButton || !sessionStopButton || previewResyncButton) return;
+  previewResyncButton = document.createElement('button');
+  previewResyncButton.id = 'preview-resync';
+  previewResyncButton.type = 'button';
+  previewResyncButton.className = 'secondary';
+  previewResyncButton.textContent = 'Resync previews';
+  previewResyncButton.title = 'Reload the selected raw WebRTC preview and the AI WebRTC preview at nearly the same time.';
+  previewResyncButton.addEventListener('click', () => {
+    const result = resyncPreviewFrames('manual');
+    if (result.rawReloaded || result.aiReloaded) {
+      setMessage('raw / AI preview players reloaded');
+    } else {
+      setMessage('no active preview player to reload', true);
+    }
+  });
+  sessionStopButton.insertAdjacentElement('afterend', previewResyncButton);
+}
+
+initPreviewResyncButton();
 
 refreshButton.addEventListener('click', loadCameras);
 sessionStartButton.addEventListener('click', prepareSession);
