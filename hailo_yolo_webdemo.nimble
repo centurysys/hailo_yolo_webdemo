@@ -8,15 +8,14 @@ srcDir        = "src"
 binDir        = "bin"
 bin           = @[
     "hailo_yolo_webdemo",
-    "hailo_live_worker",
-    "hailo_live_decode_probe",
-    "hailo_live_infer_probe"
+    "hailo_live_rtsp_publish_probe"
 ]
 
 
 # Dependencies
 
 requires "nim >= 2.2.10"
+requires "argparse >= 4.0.2"
 requires "mummy >= 0.4.8"
 requires "pixie >= 6.1.0"
 requires "sunny >= 0.1.10"

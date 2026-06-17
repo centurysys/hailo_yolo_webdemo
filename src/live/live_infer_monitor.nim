@@ -7,10 +7,9 @@
 
 import std/[strformat, strutils, times]
 
-import libav_nim
-
 import ../infer/hailo_worker
 import ../media/convert
+import ../media/decoded_source
 import ./live_frame_processor
 
 type
@@ -71,11 +70,6 @@ proc elapsedMs(start: float): int =
   if result < 0:
     result = 0
 
-proc checkAv[T](ret: FFmpegResult[T]; context: string): T =
-  if ret.isErr:
-    raise newException(IOError, &"{context}: {ret.error.message}")
-  result = ret.value
-
 proc normalizedDecoderName(value: string): string =
   let v = value.strip()
   if v.len == 0 or v == "auto":
@@ -131,8 +125,8 @@ proc waitOldestPending(
   if item.measured:
     measuredEnd = epochTime()
 
-proc submitFrame(
-    frame: Yuv420FrameView;
+proc submitFrame[T](
+    frame: T;
     frameIndex: int;
     measured: bool;
     pendings: var seq[AsyncPendingItem];
@@ -183,13 +177,10 @@ proc runLiveInferMonitor*(options: LiveInferMonitorOptions): LiveInferMonitorSum
     result.message = "live inference monitor is disabled"
     return
 
-  var decoder: VideoDecoder
+  var source: DecodedVideoSource
 
   try:
-    decoder = checkAv(
-      openVideoDecoder(options.inputRtsp, DecoderOptions(decoderName: decoderForLibav)),
-      &"openVideoDecoder input={options.inputRtsp}"
-    )
+    source = openLiveDecodedVideoSource(options.inputRtsp, decoderForLibav)
 
     ## Make HAILO open errors visible here.  The caller must close the HAILO
     ## worker from the same live worker thread when the live session stops.
@@ -207,16 +198,18 @@ proc runLiveInferMonitor*(options: LiveInferMonitorOptions): LiveInferMonitorSum
       maxInFlight = DefaultInFlight
 
     while measuredSubmitted < options.frames:
-      let readStart = epochTime()
-      let read = checkAv(decoder.readFrame(), &"readFrame#{frameIndex}")
-      result.readMs += elapsedMs(readStart)
+      let frameRead = source.readDecodedFrame()
+      result.readMs += frameRead.readMs
 
-      if read.eof:
+      if frameRead.eof:
+        break
+
+      if not frameRead.hasFrame:
         break
 
       inc result.decodedFrames
       let measured = frameIndex >= options.warmupFrames
-      submitFrame(read.frame, frameIndex, measured, pendings, result, measuredStart)
+      submitFrame(frameRead.read.frame, frameIndex, measured, pendings, result, measuredStart)
       if measured:
         inc measuredSubmitted
 
@@ -246,8 +239,8 @@ proc runLiveInferMonitor*(options: LiveInferMonitorOptions): LiveInferMonitorSum
     result.message = &"live async inference monitor failed: {e.msg}"
 
   finally:
-    if not decoder.isNil:
+    if source.isOpen:
       try:
-        decoder.close()
+        source.close()
       except CatchableError:
         discard

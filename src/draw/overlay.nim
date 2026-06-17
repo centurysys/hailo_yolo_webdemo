@@ -11,7 +11,7 @@ import libav_nim
 import threadtools
 
 import ../infer/hailo_worker
-import ../media/[convert, jpeg, mp4]
+import ../media/[convert, decoded_source, jpeg, mp4]
 import ../types
 
 const
@@ -447,6 +447,37 @@ proc resolveMp4VideoOutputFps(info: Mp4InputInfo): VideoOutputFpsInfo =
     return makeVideoOutputFpsInfo(n, d, "env")
 
   result = makeVideoOutputFpsInfo(30, 1, "default")
+
+proc resolveLiveVideoOutputFps(): VideoOutputFpsInfo =
+  ## Live input does not have a reliable finite container duration.  For the
+  ## bounded live-to-MP4 probe, keep output timing explicit and conservative.
+  ##
+  ## HAILO_DEMO_LIVE_FPS accepts the same forms as HAILO_DEMO_MP4_FPS:
+  ##   20          : fixed integer fps
+  ##   30000/1001  : fixed rational fps
+  ##   29.97       : fixed decimal fps
+  ##   auto/source  : use the live default of 20fps
+  let raw = getEnv("HAILO_DEMO_LIVE_FPS", "20").strip().toLowerAscii()
+  if raw.len == 0 or raw in ["auto", "adaptive", "source", "input", "default"]:
+    return makeVideoOutputFpsInfo(20, 1, "live-default")
+
+  var n, d: int
+  if parseFpsValue(raw, n, d):
+    return makeVideoOutputFpsInfo(n, d, "live-env")
+
+  result = makeVideoOutputFpsInfo(20, 1, "live-default")
+
+proc toLiveVideoProgressInfo(outputFps: VideoOutputFpsInfo; maxFrames: int): VideoProgressInfo =
+  result.sourceFps = outputFps.fps
+  result.sourceFpsNum = outputFps.num
+  result.sourceFpsDen = outputFps.den
+  result.hasSourceFps = outputFps.fps > 0.0
+  if maxFrames > 0:
+    result.estimatedTotalFrames = maxFrames
+    result.hasEstimatedTotalFrames = true
+    if outputFps.fps > 0.0:
+      result.durationSeconds = float64(maxFrames) / outputFps.fps
+      result.hasDuration = true
 
 proc applyOutputFpsInfo(stats: var OverlayStats; info: VideoOutputFpsInfo) =
   stats.outputFps = info.fps
@@ -1525,6 +1556,32 @@ proc encodeRgbxFrameNv12(
   checkFFmpegVoid(encoder.submitFrame(), "submit encoder frame")
   drainEncoder(encoder, writer, stats)
 
+proc drainEncoderRtsp(
+    encoder: VideoEncoder;
+    writer: RtspVideoWriter;
+    stats: var OverlayStats
+  ) =
+  while true:
+    let packetRead = checkFFmpeg(encoder.receivePacket(), "receive encoded packet")
+    if not packetRead.hasPacket:
+      break
+
+    inc stats.videoPackets
+    stats.videoPacketBytes += packetRead.packet.size
+    checkFFmpegVoid(writer.writePacket(packetRead), "write RTSP encoded packet")
+
+proc encodeRgbxFrameNv12Rtsp(
+    encoder: VideoEncoder;
+    writer: RtspVideoWriter;
+    rgbx: var OwnedRGBXFrame;
+    frameIndex: int64;
+    stats: var OverlayStats
+  ) =
+  let writable = checkFFmpeg(encoder.beginFrameNV12(frameIndex), "begin RTSP encoder NV12 frame")
+  checkFFmpegVoid(copyRGBXToNV12Padded(rgbx, writable), "copy RGBX to padded NV12 for RTSP")
+  checkFFmpegVoid(encoder.submitFrame(), "submit RTSP encoder frame")
+  drainEncoderRtsp(encoder, writer, stats)
+
 proc drainOldestPendingVideoFrame(
     pendingFrames: var seq[PendingVideoFrame];
     encoder: VideoEncoder;
@@ -1854,6 +1911,32 @@ proc waitVideoPipelineResultWithProgress(
     sleep(10)
 
 
+
+
+proc rtspPublisherLogPath(): string =
+  result = getEnv("HAILO_DEMO_RTSP_PUBLISHER_LOG", "/tmp/hailo-live-rtsp-publisher.log")
+
+proc writeRtspPublisherLog(path, content: string) =
+  if path.len == 0:
+    return
+  try:
+    writeFile(path, content)
+  except CatchableError:
+    discard
+
+proc appendRtspPublisherLog(path, content: string) =
+  if path.len == 0 or content.len == 0:
+    return
+  try:
+    var f = open(path, fmAppend)
+    try:
+      f.write(content)
+    finally:
+      f.close()
+  except CatchableError:
+    discard
+
+
 proc processThreadedVideoPipelineFrame(
     item: var VideoPipelineItem;
     encoder: VideoEncoder;
@@ -1919,6 +2002,86 @@ proc processThreadedVideoPipelineFrame(
 
   stageStart = epochTime()
   encodeRgbxFrameNv12(encoder, writer, item.rgbx.value, int64(stats.videoFrames), stats)
+  stats.encodeMs += elapsedMs(stageStart)
+
+  inc stats.videoFrames
+  stats.pipelineFrames = stats.videoFrames
+  if item.hasProgressSeconds:
+    stats.progressSeconds = item.progressSeconds
+
+  sendEncodedVideoFrameProgress(
+    progressQ,
+    stats.videoFrames,
+    item.progressSeconds,
+    item.hasProgressSeconds,
+    false
+  )
+
+proc processThreadedVideoPipelineFrameRtsp(
+    item: var VideoPipelineItem;
+    encoder: VideoEncoder;
+    writer: RtspVideoWriter;
+    font: Font;
+    hasFont: bool;
+    drawOptions: OverlayDrawOptions;
+    previewOutputPath: string;
+    previewFrameNumber: int;
+    previewSaved: var bool;
+    detectionsWriter: var DetectionJsonWriter;
+    maxFrames: int;
+    progressInfo: VideoProgressInfo;
+    progressQ: ThreadQueue[VideoPipelineProgress];
+    stats: var OverlayStats
+  ) =
+  var yoloResult: YoloAsyncResult
+  {.cast(gcsafe).}:
+    yoloResult = item.pending.waitYoloAsync()
+  inc stats.pipelineReplies
+  ## Do not store per-frame wait timings in the consumer thread.
+  ## Those seq buffers would be allocated on the consumer thread and later moved
+  ## back to the producer thread as part of OverlayStats, which is unsafe with
+  ## Nim's thread-local GC/ORC heaps and can crash during deallocation.  Keep only
+  ## scalar totals on the consumer side; producer-side timing seqs remain safe.
+  stats.inferWaitMs += yoloResult.waitMs
+  stats.inferMs += yoloResult.totalMs
+  stats.inferOverlapMs += max(0, yoloResult.totalMs - item.pending.submitMs - yoloResult.waitMs)
+  stats.hailoWriteUs += yoloResult.writeUs
+  stats.hailoReadUs += yoloResult.readUs
+  stats.hailoParseUs += yoloResult.parseUs
+  stats.hailoSortUs += yoloResult.sortUs
+
+  if int(yoloResult.requestId) != item.frameIndex:
+    raise newException(
+      IOError,
+      &"HAILO result frame mismatch: expected={item.frameIndex} actual={yoloResult.requestId}"
+    )
+
+  detectionsWriter.writeFrameDetections(
+    item.frameIndex,
+    item.frameTimestampSeconds,
+    yoloResult.detections
+  )
+
+  var stageStart = epochTime()
+  let drawResult = item.rgbx.value.drawDetectionsOnRgbxFrame(
+    yoloResult.detections,
+    font,
+    hasFont,
+    drawOptions
+  )
+  stats.boxesDrawn += drawResult.boxes
+  stats.labelsDrawn += drawResult.labels
+  stats.drawMs += elapsedMs(stageStart)
+  stats.detections += yoloResult.detections.len
+
+  let completedFrameNumber = stats.videoFrames + 1
+  if not previewSaved and previewOutputPath.len > 0 and completedFrameNumber >= previewFrameNumber:
+    {.cast(gcsafe).}:
+      saveRgbxFramePreviewJpeg(item.rgbx.value, previewOutputPath)
+    previewSaved = true
+
+  stageStart = epochTime()
+  encodeRgbxFrameNv12Rtsp(encoder, writer, item.rgbx.value, int64(stats.videoFrames), stats)
   stats.encodeMs += elapsedMs(stageStart)
 
   inc stats.videoFrames
@@ -2054,6 +2217,132 @@ proc videoPipelineConsumerMain(state: VideoPipelineWorkerState) {.thread.} =
 
   sendVideoPipelineResult(state.resultQ, move workerResult)
 
+proc videoPipelineLibavRtspConsumerMain(state: VideoPipelineWorkerState) {.thread.} =
+  ## Library-backed RTSP publisher probe.
+  ##
+  ## This deliberately reuses the same encoder/write path as the stable MP4
+  ## worker, but points the libav writer at an RTSP URL.  The first goal is to
+  ## verify whether libav_nim's current writer can mux/publish to MediaMTX
+  ## without the ffmpeg subprocess bridge.
+  var workerResult = VideoPipelineWorkerResult(kind: vprDone)
+
+  try:
+    let
+      outputRtsp = state.outputPath.toLocalString()
+      previewOutputPath = state.previewOutputPath.toLocalString()
+      detectionsOutputPath = state.detectionsOutputPath.toLocalString()
+      liveDetectionsOutputPath = state.liveDetectionsOutputPath.toLocalString()
+      fontPath = state.fontPath.toLocalString()
+      encoderName = state.encoderName.toLocalString()
+      loadedFont = loadOverlayFont(fontPath)
+      drawOptions = resolveDrawOptionsFromJobOptions(state.options, true)
+    var
+      encoder: VideoEncoder
+      writer: RtspVideoWriter
+      detectionsWriter: DetectionJsonWriter
+      encoderReady = false
+      previewSaved = false
+
+    try:
+      while true:
+        var item = state.frameQ.receive()
+
+        case item.kind
+        of vpiDone:
+          break
+        of vpiError:
+          raise newException(IOError, item.message)
+        of vpiFrame:
+          if not encoderReady:
+            let
+              frameW = item.rgbx.value.width
+              frameH = item.rgbx.value.height
+              encoderHeight = alignUp(frameH, 16)
+
+            let actualBitrate = resolveMp4VideoBitrate(frameW, frameH, state.fpsForBitrate, state.bitrateConfig)
+            workerResult.stats.outputBitrate = actualBitrate
+
+            var stageStart = epochTime()
+            encoder = checkFFmpeg(openVideoEncoder(VideoEncoderOptions(
+              encoderName: encoderName,
+              width: frameW,
+              height: encoderHeight,
+              pixelFormat: pfNv12,
+              timeBase: Rational(num: int32(state.fpsDen), den: int32(state.fpsNum)),
+              framerate: Rational(num: int32(state.fpsNum), den: int32(state.fpsDen)),
+              bitRate: int64(actualBitrate),
+              gopSize: state.gopSize,
+              maxBFrames: 0,
+              globalHeader: false
+            )), &"open RTSP video encoder {encoderName}")
+            workerResult.stats.encoderOpenMs = elapsedMs(stageStart)
+
+            stageStart = epochTime()
+            writer = checkFFmpeg(openRtspVideoWriter(outputRtsp, encoder, rtspTransport = "tcp"), "open RTSP writer via libav")
+            workerResult.stats.writerOpenMs = elapsedMs(stageStart)
+            detectionsWriter = openDetectionJsonWriter(
+              detectionsOutputPath,
+              liveDetectionsOutputPath,
+              frameW,
+              frameH,
+              state.progressInfo
+            )
+            encoderReady = true
+
+          processThreadedVideoPipelineFrameRtsp(
+            item,
+            encoder,
+            writer,
+            loadedFont.font,
+            loadedFont.hasFont,
+            drawOptions,
+            previewOutputPath,
+            state.previewFrameNumber,
+            previewSaved,
+            detectionsWriter,
+            state.maxFrames,
+            state.progressInfo,
+            state.progressQ,
+            workerResult.stats
+          )
+
+      if workerResult.stats.videoFrames <= 0:
+        raise newException(IOError, "RTSP publisher received no video frame")
+
+      sendEncodedVideoFrameProgress(
+        state.progressQ,
+        workerResult.stats.videoFrames,
+        workerResult.stats.progressSeconds,
+        workerResult.stats.progressSeconds > 0.0 or workerResult.stats.videoFrames == 1,
+        true
+      )
+
+      var stageStart = epochTime()
+      checkFFmpegVoid(encoder.flush(), "flush RTSP encoder")
+      drainEncoderRtsp(encoder, writer, workerResult.stats)
+      workerResult.stats.encoderFlushMs = elapsedMs(stageStart)
+      workerResult.stats.encodeMs += workerResult.stats.encoderFlushMs
+
+      stageStart = epochTime()
+      checkFFmpegVoid(writer.finish(), "finish RTSP writer via libav")
+      workerResult.stats.writerFinishMs = elapsedMs(stageStart)
+      workerResult.stats.encodeMs += workerResult.stats.writerFinishMs
+
+      closeDetectionJsonWriter(detectionsWriter)
+
+    finally:
+      abortDetectionJsonWriter(detectionsWriter)
+      if not writer.isNil:
+        writer.close()
+      if not encoder.isNil:
+        encoder.close()
+
+  except CatchableError as e:
+    workerResult.kind = vprError
+    workerResult.message = e.msg
+
+  sendVideoPipelineResult(state.resultQ, move workerResult)
+
 proc addRgbxFrameToPool(
     pool: Pool[OwnedRGBXFrame];
     width, height: int
@@ -2091,6 +2380,93 @@ proc notifyPreparedVideoFrameProgress(
     progress,
     formatVideoProgressMessage(submitted, inputInfo, timestampSeconds, hasProgressSeconds)
   )
+
+
+proc submitDecodedFrameToVideoPipeline[T](
+    frameRead: T;
+    progressInfo: VideoProgressInfo;
+    framePoolCapacity: int;
+    framePool: var Pool[OwnedRGBXFrame];
+    poolReady: var bool;
+    pooledWidth: var int;
+    pooledHeight: var int;
+    frameQ: ThreadQueue[VideoPipelineItem];
+    stats: var OverlayStats
+  ) =
+  ## Convert one borrowed decoded frame into owned pipeline work.
+  ##
+  ## This is the shared producer-side seam for the MP4 path and the upcoming
+  ## live path.  The source-specific reader owns the borrowed libav frame; this
+  ## proc copies everything needed by later stages into owned YOLO/RGBX buffers
+  ## before the caller reads the next decoded frame.
+  stats.readFramesMs.add(frameRead.readMs)
+  stats.readFrameMs += frameRead.readMs
+  stats.imageWidth = frameRead.frameWidth
+  stats.imageHeight = frameRead.frameHeight
+  stats.previewFrameIndex = frameRead.frameIndex
+
+  let frameTimestampSeconds = detectionTimestampSeconds(
+    frameRead.frameIndex,
+    frameRead.timestampSeconds,
+    frameRead.hasTimestampSeconds,
+    progressInfo
+  )
+  var progressSeconds = 0.0
+  let hasProgressSeconds = progressTimestampSeconds(
+    frameRead.frameIndex,
+    frameRead.timestampSeconds,
+    frameRead.hasTimestampSeconds,
+    progressInfo,
+    progressSeconds
+  )
+  if hasProgressSeconds:
+    stats.progressSeconds = progressSeconds
+
+  if not poolReady:
+    let poolRes = newPool[OwnedRGBXFrame](framePoolCapacity)
+    if poolRes.isErr:
+      raise newException(IOError, &"new RGBX frame pool failed: {poolRes.error}")
+    framePool = poolRes.get()
+    pooledWidth = frameRead.frameWidth
+    pooledHeight = frameRead.frameHeight
+    for _ in 0 ..< framePoolCapacity:
+      framePool.addRgbxFrameToPool(pooledWidth, pooledHeight)
+    poolReady = true
+  elif frameRead.frameWidth != pooledWidth or frameRead.frameHeight != pooledHeight:
+    raise newException(
+      IOError,
+      &"video frame size changed: expected={pooledWidth}x{pooledHeight} actual={frameRead.frameWidth}x{frameRead.frameHeight}"
+    )
+
+  var stageStart = epochTime()
+  var yoloInput = frameRead.read.frame.prepareYoloInput()
+  let letterboxMs = elapsedMs(stageStart)
+  stats.letterboxFramesMs.add(letterboxMs)
+  stats.letterboxMs += letterboxMs
+
+  let pending = yoloInput.submitYoloAsync(uint64(frameRead.frameIndex))
+  stats.inferSubmitFramesMs.add(pending.submitMs)
+  stats.inferSubmitMs += pending.submitMs
+  inc stats.pipelineSubmitted
+
+  stageStart = epochTime()
+  var rgbxItem = framePool.acquire()
+  checkFFmpegVoid(copyI420ToRGBX(frameRead.read.frame, rgbxItem.value), "copy decoded I420 to pooled RGBX")
+  let rgbxMs = elapsedMs(stageStart)
+  stats.rgbxFramesMs.add(rgbxMs)
+  stats.rgbxMs += rgbxMs
+
+  var item = VideoPipelineItem(
+    kind: vpiFrame,
+    frameIndex: frameRead.frameIndex,
+    pending: pending,
+    rgbx: move rgbxItem,
+    frameTimestampSeconds: frameTimestampSeconds,
+    progressSeconds: progressSeconds,
+    hasProgressSeconds: hasProgressSeconds
+  )
+  frameQ.sendVideoPipelineItem(move item, "send video pipeline frame")
+  stats.pipelineFrames = stats.pipelineSubmitted
 
 proc mergeThreadedVideoStats(result: var OverlayStats; workerStats: OverlayStats) =
   result.pipelineReplies = workerStats.pipelineReplies
@@ -2222,73 +2598,17 @@ proc drawMp4VideoOverlayThreaded(
       if frameRead.eof:
         break
 
-      result.readFramesMs.add(frameRead.readMs)
-      result.readFrameMs += frameRead.readMs
-      result.imageWidth = frameRead.frameWidth
-      result.imageHeight = frameRead.frameHeight
-      result.previewFrameIndex = frameRead.frameIndex
-      let frameTimestampSeconds = detectionTimestampSeconds(
-        frameRead.frameIndex,
-        frameRead.timestampSeconds,
-        frameRead.hasTimestampSeconds,
-        progressInfo
-      )
-      var progressSeconds = 0.0
-      let hasProgressSeconds = progressTimestampSeconds(
-        frameRead.frameIndex,
-        frameRead.timestampSeconds,
-        frameRead.hasTimestampSeconds,
+      submitDecodedFrameToVideoPipeline(
+        frameRead,
         progressInfo,
-        progressSeconds
+        framePoolCapacity,
+        framePool,
+        poolReady,
+        pooledWidth,
+        pooledHeight,
+        frameQ,
+        result
       )
-      if hasProgressSeconds:
-        result.progressSeconds = progressSeconds
-
-      if not poolReady:
-        let poolRes = newPool[OwnedRGBXFrame](framePoolCapacity)
-        if poolRes.isErr:
-          raise newException(IOError, &"new RGBX frame pool failed: {poolRes.error}")
-        framePool = poolRes.get()
-        pooledWidth = frameRead.frameWidth
-        pooledHeight = frameRead.frameHeight
-        for _ in 0 ..< framePoolCapacity:
-          framePool.addRgbxFrameToPool(pooledWidth, pooledHeight)
-        poolReady = true
-      elif frameRead.frameWidth != pooledWidth or frameRead.frameHeight != pooledHeight:
-        raise newException(
-          IOError,
-          &"video frame size changed: expected={pooledWidth}x{pooledHeight} actual={frameRead.frameWidth}x{frameRead.frameHeight}"
-        )
-
-      var stageStart = epochTime()
-      var yoloInput = frameRead.read.frame.prepareYoloInput()
-      let letterboxMs = elapsedMs(stageStart)
-      result.letterboxFramesMs.add(letterboxMs)
-      result.letterboxMs += letterboxMs
-
-      let pending = yoloInput.submitYoloAsync(uint64(frameRead.frameIndex))
-      result.inferSubmitFramesMs.add(pending.submitMs)
-      result.inferSubmitMs += pending.submitMs
-      inc result.pipelineSubmitted
-
-      stageStart = epochTime()
-      var rgbxItem = framePool.acquire()
-      checkFFmpegVoid(copyI420ToRGBX(frameRead.read.frame, rgbxItem.value), "copy decoded I420 to pooled RGBX")
-      let rgbxMs = elapsedMs(stageStart)
-      result.rgbxFramesMs.add(rgbxMs)
-      result.rgbxMs += rgbxMs
-
-      var item = VideoPipelineItem(
-        kind: vpiFrame,
-        frameIndex: frameRead.frameIndex,
-        pending: pending,
-        rgbx: move rgbxItem,
-        frameTimestampSeconds: frameTimestampSeconds,
-        progressSeconds: progressSeconds,
-        hasProgressSeconds: hasProgressSeconds
-      )
-      frameQ.sendVideoPipelineItem(move item, "send video pipeline frame")
-      result.pipelineFrames = result.pipelineSubmitted
 
       ## Progress is produced by the consumer thread after overlay/encode.
       ## Drain it from this job worker thread so JobStore is never updated from
@@ -2345,6 +2665,372 @@ proc drawMp4VideoOverlayThreaded(
       sharedLiveDetectionsOutputPath.freeSharedCString()
       sharedFontPath.freeSharedCString()
       sharedEncoderName.freeSharedCString()
+    raise
+
+
+proc drawLiveRtspVideoOverlayToMp4*(
+    inputRtsp, outputPath, fontPath: string;
+    decoderName = "";
+    maxFrames = 90;
+    previewOutputPath = "";
+    options: JobOptions = defaultJobOptions();
+    onProgress: OverlayProgressCallback = nil;
+    progressCtx: pointer = nil;
+    detectionsOutputPath = "";
+    liveDetectionsOutputPath = ""
+  ): OverlayStats =
+  ## Bounded live RTSP -> decoded frame source -> MP4-proven threaded overlay
+  ## pipeline probe.
+  ##
+  ## This is intentionally not the final /cam-ai publisher yet.  It validates
+  ## that live decoded frames can enter the same producer/consumer seam used by
+  ## the stable file path, while keeping the output as a finite MP4 artifact.
+  let totalStart = epochTime()
+  let bitrateConfig = resolveMp4VideoBitrateConfig(options)
+  let actualMaxFrames = max(1, maxFrames)
+  let encoderName = resolveMp4VideoEncoderName()
+  let maxInFlight = resolveMp4VideoInFlight()
+  let previewFrameNumber = resolveVideoPreviewFrame()
+  let framePoolCapacity = resolveMp4VideoFramePoolCapacity(maxInFlight)
+  let queueCapacity = maxInFlight
+
+  result.pipelineInFlight = maxInFlight
+
+  let frameQRes = newThreadQueue[VideoPipelineItem](queueCapacity)
+  if frameQRes.isErr:
+    raise newException(IOError, &"new live video pipeline frame queue failed: {frameQRes.error}")
+  let frameQ = frameQRes.get()
+
+  let resultQRes = newThreadQueue[VideoPipelineWorkerResult](1)
+  if resultQRes.isErr:
+    raise newException(IOError, &"new live video pipeline result queue failed: {resultQRes.error}")
+  let resultQ = resultQRes.get()
+
+  let progressQRes = newThreadQueue[VideoPipelineProgress](32)
+  if progressQRes.isErr:
+    raise newException(IOError, &"new live video pipeline progress queue failed: {progressQRes.error}")
+  let progressQ = progressQRes.get()
+
+  var
+    sharedOutputPath = initSharedCString(outputPath)
+    sharedPreviewOutputPath = initSharedCString(previewOutputPath)
+    sharedDetectionsOutputPath = initSharedCString(detectionsOutputPath)
+    sharedLiveDetectionsOutputPath = initSharedCString(liveDetectionsOutputPath)
+    sharedFontPath = initSharedCString(fontPath)
+    sharedEncoderName = initSharedCString(encoderName)
+
+  var consumerThread: Thread[VideoPipelineWorkerState]
+  var consumerStarted = false
+  var terminalSent = false
+
+  try:
+    var source = openLiveDecodedVideoSource(inputRtsp, decoderName)
+    defer: source.close()
+
+    result.decoderOpenMs = source.decoderOpenMs
+    result.decoderName = source.decoderLabel
+
+    let outputFps = resolveLiveVideoOutputFps()
+    result.applyOutputFpsInfo(outputFps)
+    result.sourceFps = outputFps.fps
+    result.sourceFpsSource = outputFps.source
+    result.estimatedTotalFrames = actualMaxFrames
+    if outputFps.fps > 0.0:
+      result.inputDurationSeconds = float64(actualMaxFrames) / outputFps.fps
+      result.inputDurationSource = "live-bounded"
+
+    let progressInfo = toLiveVideoProgressInfo(outputFps, actualMaxFrames)
+
+    var workerState = VideoPipelineWorkerState(
+      frameQ: frameQ,
+      resultQ: resultQ,
+      progressQ: progressQ,
+      outputPath: sharedOutputPath,
+      previewOutputPath: sharedPreviewOutputPath,
+      detectionsOutputPath: sharedDetectionsOutputPath,
+      liveDetectionsOutputPath: sharedLiveDetectionsOutputPath,
+      fontPath: sharedFontPath,
+      fpsNum: outputFps.num,
+      fpsDen: outputFps.den,
+      fpsForBitrate: outputFps.fpsForBitrate,
+      gopSize: outputFps.gopSize,
+      bitrateConfig: bitrateConfig,
+      previewFrameNumber: previewFrameNumber,
+      encoderName: sharedEncoderName,
+      maxFrames: actualMaxFrames,
+      progressInfo: progressInfo,
+      options: options
+    )
+    createThread(consumerThread, videoPipelineConsumerMain, workerState)
+    consumerStarted = true
+
+    var
+      poolReady = false
+      framePool: Pool[OwnedRGBXFrame]
+      pooledWidth = 0
+      pooledHeight = 0
+
+    while result.pipelineSubmitted < actualMaxFrames:
+      let frameRead = source.readDecodedFrame()
+      case frameRead.status
+      of dvrsFrame:
+        submitDecodedFrameToVideoPipeline(
+          frameRead,
+          progressInfo,
+          framePoolCapacity,
+          framePool,
+          poolReady,
+          pooledWidth,
+          pooledHeight,
+          frameQ,
+          result
+        )
+        drainVideoPipelineProgress(progressQ, onProgress, progressCtx, actualMaxFrames, progressInfo)
+      of dvrsEof:
+        break
+      of dvrsStopRequested, dvrsInputTimeout:
+        break
+
+    var doneItem = VideoPipelineItem(kind: vpiDone)
+    frameQ.sendVideoPipelineItem(move doneItem, "send live video pipeline done")
+    terminalSent = true
+
+    let workerResult = waitVideoPipelineResultWithProgress(
+      resultQ,
+      progressQ,
+      onProgress,
+      progressCtx,
+      actualMaxFrames,
+      progressInfo
+    )
+    joinThread(consumerThread)
+    consumerStarted = false
+
+    sharedOutputPath.freeSharedCString()
+    sharedPreviewOutputPath.freeSharedCString()
+    sharedDetectionsOutputPath.freeSharedCString()
+    sharedLiveDetectionsOutputPath.freeSharedCString()
+    sharedFontPath.freeSharedCString()
+    sharedEncoderName.freeSharedCString()
+
+    case workerResult.kind
+    of vprError:
+      raise newException(IOError, workerResult.message)
+    of vprDone:
+      result.mergeThreadedVideoStats(workerResult.stats)
+
+    if result.videoFrames <= 0:
+      raise newException(IOError, &"live RTSP input produced no decodable video frame: {inputRtsp}")
+
+    result.decodeMs = result.decoderOpenMs + result.readFrameMs
+    result.totalMs = elapsedMs(totalStart)
+
+  except CatchableError as e:
+    if consumerStarted and not terminalSent:
+      var errItem = VideoPipelineItem(kind: vpiError, message: e.msg)
+      try:
+        frameQ.sendVideoPipelineItem(move errItem, "send live video pipeline error")
+        discard resultQ.receiveVideoPipelineResult()
+      except CatchableError:
+        discard
+      joinThread(consumerThread)
+    sharedOutputPath.freeSharedCString()
+    sharedPreviewOutputPath.freeSharedCString()
+    sharedDetectionsOutputPath.freeSharedCString()
+    sharedLiveDetectionsOutputPath.freeSharedCString()
+    sharedFontPath.freeSharedCString()
+    sharedEncoderName.freeSharedCString()
+    raise
+
+
+
+proc drawLiveRtspVideoOverlayToRtsp*(
+    inputRtsp, outputRtsp, fontPath: string;
+    decoderName = "";
+    maxFrames = 300;
+    previewOutputPath = "";
+    options: JobOptions = defaultJobOptions();
+    onProgress: OverlayProgressCallback = nil;
+    progressCtx: pointer = nil;
+    detectionsOutputPath = "";
+    liveDetectionsOutputPath = ""
+  ): OverlayStats =
+  ## Bounded live RTSP -> decoded frame source -> MP4-proven overlay pipeline
+  ## -> RTSP publish probe.
+  ##
+  ## This keeps the proven file-style HAILO/overlay pipeline, but replaces the
+  ## finite MP4 writer with a libav RTSP publisher.  It is still bounded by
+  ## maxFrames so the publish edge can be tested without introducing Stop/timeout
+  ## lifetime handling yet.
+  let totalStart = epochTime()
+  writeRtspPublisherLog(rtspPublisherLogPath(), &"drawLiveRtspVideoOverlayToRtsp entry input={inputRtsp} output={outputRtsp} maxFrames={maxFrames}\n")
+  let bitrateConfig = resolveMp4VideoBitrateConfig(options)
+  let actualMaxFrames = max(1, maxFrames)
+  let encoderName = resolveMp4VideoEncoderName()
+  let maxInFlight = resolveMp4VideoInFlight()
+  let previewFrameNumber = resolveVideoPreviewFrame()
+  let framePoolCapacity = resolveMp4VideoFramePoolCapacity(maxInFlight)
+  let queueCapacity = maxInFlight
+
+  result.pipelineInFlight = maxInFlight
+
+  let frameQRes = newThreadQueue[VideoPipelineItem](queueCapacity)
+  if frameQRes.isErr:
+    raise newException(IOError, &"new live RTSP publish frame queue failed: {frameQRes.error}")
+  let frameQ = frameQRes.get()
+
+  let resultQRes = newThreadQueue[VideoPipelineWorkerResult](1)
+  if resultQRes.isErr:
+    raise newException(IOError, &"new live RTSP publish result queue failed: {resultQRes.error}")
+  let resultQ = resultQRes.get()
+
+  let progressQRes = newThreadQueue[VideoPipelineProgress](32)
+  if progressQRes.isErr:
+    raise newException(IOError, &"new live RTSP publish progress queue failed: {progressQRes.error}")
+  let progressQ = progressQRes.get()
+
+  var
+    sharedOutputPath = initSharedCString(outputRtsp)
+    sharedPreviewOutputPath = initSharedCString(previewOutputPath)
+    sharedDetectionsOutputPath = initSharedCString(detectionsOutputPath)
+    sharedLiveDetectionsOutputPath = initSharedCString(liveDetectionsOutputPath)
+    sharedFontPath = initSharedCString(fontPath)
+    sharedEncoderName = initSharedCString(encoderName)
+
+  var consumerThread: Thread[VideoPipelineWorkerState]
+  var consumerStarted = false
+  var terminalSent = false
+
+  try:
+    appendRtspPublisherLog(rtspPublisherLogPath(), "opening live decoded source for RTSP publish\n")
+    var source = openLiveDecodedVideoSource(inputRtsp, decoderName)
+    defer: source.close()
+
+    appendRtspPublisherLog(rtspPublisherLogPath(), &"opened live decoded source for RTSP publish decoder={source.decoderLabel} openMs={source.decoderOpenMs}\n")
+    result.decoderOpenMs = source.decoderOpenMs
+    result.decoderName = source.decoderLabel
+
+    let outputFps = resolveLiveVideoOutputFps()
+    result.applyOutputFpsInfo(outputFps)
+    result.sourceFps = outputFps.fps
+    result.sourceFpsSource = outputFps.source
+    result.estimatedTotalFrames = actualMaxFrames
+    if outputFps.fps > 0.0:
+      result.inputDurationSeconds = float64(actualMaxFrames) / outputFps.fps
+      result.inputDurationSource = "live-rtsp-bounded"
+
+    let progressInfo = toLiveVideoProgressInfo(outputFps, actualMaxFrames)
+
+    var workerState = VideoPipelineWorkerState(
+      frameQ: frameQ,
+      resultQ: resultQ,
+      progressQ: progressQ,
+      outputPath: sharedOutputPath,
+      previewOutputPath: sharedPreviewOutputPath,
+      detectionsOutputPath: sharedDetectionsOutputPath,
+      liveDetectionsOutputPath: sharedLiveDetectionsOutputPath,
+      fontPath: sharedFontPath,
+      fpsNum: outputFps.num,
+      fpsDen: outputFps.den,
+      fpsForBitrate: outputFps.fpsForBitrate,
+      gopSize: outputFps.gopSize,
+      bitrateConfig: bitrateConfig,
+      previewFrameNumber: previewFrameNumber,
+      encoderName: sharedEncoderName,
+      maxFrames: actualMaxFrames,
+      progressInfo: progressInfo,
+      options: options
+    )
+    appendRtspPublisherLog(rtspPublisherLogPath(), "creating RTSP consumer thread\n")
+    createThread(consumerThread, videoPipelineLibavRtspConsumerMain, workerState)
+    consumerStarted = true
+    appendRtspPublisherLog(rtspPublisherLogPath(), "created RTSP consumer thread\n")
+
+    var
+      poolReady = false
+      framePool: Pool[OwnedRGBXFrame]
+      pooledWidth = 0
+      pooledHeight = 0
+
+    while result.pipelineSubmitted < actualMaxFrames:
+      if result.pipelineSubmitted < 5 or (result.pipelineSubmitted mod 30) == 0:
+        appendRtspPublisherLog(rtspPublisherLogPath(), &"producer reading frame submitted={result.pipelineSubmitted}\n")
+      let frameRead = source.readDecodedFrame()
+      if result.pipelineSubmitted < 5 or (result.pipelineSubmitted mod 30) == 0:
+        appendRtspPublisherLog(rtspPublisherLogPath(), &"producer read status={frameRead.status} submitted={result.pipelineSubmitted}\n")
+      case frameRead.status
+      of dvrsFrame:
+        if result.pipelineSubmitted < 5 or (result.pipelineSubmitted mod 30) == 0:
+          appendRtspPublisherLog(rtspPublisherLogPath(), &"producer submit start nextFrame={result.pipelineSubmitted}\n")
+        submitDecodedFrameToVideoPipeline(
+          frameRead,
+          progressInfo,
+          framePoolCapacity,
+          framePool,
+          poolReady,
+          pooledWidth,
+          pooledHeight,
+          frameQ,
+          result
+        )
+        if result.pipelineSubmitted <= 5 or (result.pipelineSubmitted mod 30) == 0:
+          appendRtspPublisherLog(rtspPublisherLogPath(), &"producer submit done submitted={result.pipelineSubmitted}\n")
+        drainVideoPipelineProgress(progressQ, onProgress, progressCtx, actualMaxFrames, progressInfo)
+      of dvrsEof:
+        break
+      of dvrsStopRequested, dvrsInputTimeout:
+        break
+
+    var doneItem = VideoPipelineItem(kind: vpiDone)
+    frameQ.sendVideoPipelineItem(move doneItem, "send live RTSP publish pipeline done")
+    terminalSent = true
+    appendRtspPublisherLog(rtspPublisherLogPath(), &"producer sent done submitted={result.pipelineSubmitted}\n")
+
+    let workerResult = waitVideoPipelineResultWithProgress(
+      resultQ,
+      progressQ,
+      onProgress,
+      progressCtx,
+      actualMaxFrames,
+      progressInfo
+    )
+    joinThread(consumerThread)
+    consumerStarted = false
+
+    sharedOutputPath.freeSharedCString()
+    sharedPreviewOutputPath.freeSharedCString()
+    sharedDetectionsOutputPath.freeSharedCString()
+    sharedLiveDetectionsOutputPath.freeSharedCString()
+    sharedFontPath.freeSharedCString()
+    sharedEncoderName.freeSharedCString()
+
+    case workerResult.kind
+    of vprError:
+      raise newException(IOError, workerResult.message)
+    of vprDone:
+      result.mergeThreadedVideoStats(workerResult.stats)
+
+    if result.videoFrames <= 0:
+      raise newException(IOError, &"live RTSP input produced no decodable video frame: {inputRtsp}")
+
+    result.decodeMs = result.decoderOpenMs + result.readFrameMs
+    result.totalMs = elapsedMs(totalStart)
+
+  except CatchableError as e:
+    if consumerStarted and not terminalSent:
+      var errItem = VideoPipelineItem(kind: vpiError, message: e.msg)
+      try:
+        frameQ.sendVideoPipelineItem(move errItem, "send live RTSP publish pipeline error")
+        discard resultQ.receiveVideoPipelineResult()
+      except CatchableError:
+        discard
+      joinThread(consumerThread)
+    sharedOutputPath.freeSharedCString()
+    sharedPreviewOutputPath.freeSharedCString()
+    sharedDetectionsOutputPath.freeSharedCString()
+    sharedLiveDetectionsOutputPath.freeSharedCString()
+    sharedFontPath.freeSharedCString()
+    sharedEncoderName.freeSharedCString()
     raise
 
 proc drawMp4VideoOverlayLookahead(

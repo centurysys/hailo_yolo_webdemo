@@ -8,10 +8,9 @@
 
 import std/[os, strformat, strutils, times]
 
-import libav_nim
+import ../media/decoded_source
 
 const
-  DefaultLiveDecoderName = "h264_v4l2m2m"
   DefaultProbeFrames = 0
   MaxProbeFrames = 300
 
@@ -32,11 +31,6 @@ proc elapsedMs(start: float): int =
   result = int((epochTime() - start) * 1000.0 + 0.5)
   if result < 0:
     result = 0
-
-proc checkAv[T](ret: FFmpegResult[T]; context: string): T =
-  if ret.isErr:
-    raise newException(IOError, &"{context}: {ret.error.message}")
-  result = ret.value
 
 proc parseEnvInt(name: string; defaultValue, lo, hi: int): int =
   let raw = getEnv(name, $defaultValue).strip()
@@ -83,27 +77,25 @@ proc runLiveDecodeProbe*(inputRtsp: string; decoderName = ""; maxFrames = Defaul
     return
 
   let totalStart = epochTime()
-  var decoder: VideoDecoder
+  var source: DecodedVideoSource
 
   try:
-    let openStart = epochTime()
-    decoder = checkAv(
-      openVideoDecoder(inputRtsp, DecoderOptions(decoderName: decoderName)),
-      &"openVideoDecoder input={inputRtsp}"
-    )
-    result.openMs = elapsedMs(openStart)
+    source = openLiveDecodedVideoSource(inputRtsp, decoderName)
+    result.openMs = source.decoderOpenMs
 
-    for i in 0 ..< maxFrames:
-      let readStart = epochTime()
-      let read = checkAv(decoder.readFrame(), &"readFrame#{i}")
-      result.readMs += elapsedMs(readStart)
+    for _ in 0 ..< maxFrames:
+      let frameRead = source.readDecodedFrame()
+      result.readMs += frameRead.readMs
 
-      if read.eof:
+      if frameRead.eof:
+        break
+
+      if not frameRead.hasFrame:
         break
 
       inc result.frames
-      result.width = read.frame.width
-      result.height = read.frame.height
+      result.width = frameRead.frameWidth
+      result.height = frameRead.frameHeight
 
     result.elapsedMs = elapsedMs(totalStart)
     result.ok = result.frames > 0
@@ -119,8 +111,8 @@ proc runLiveDecodeProbe*(inputRtsp: string; decoderName = ""; maxFrames = Defaul
     result.message = &"live decode probe failed: {e.msg}"
 
   finally:
-    if not decoder.isNil:
+    if source.isOpen:
       try:
-        decoder.close()
+        source.close()
       except CatchableError:
         discard
