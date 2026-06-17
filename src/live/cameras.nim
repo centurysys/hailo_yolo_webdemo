@@ -8,7 +8,7 @@
 import std/[json, locks, os, osproc, streams, strformat, strutils, tables]
 
 const
-  defaultRtspTransport* = "tcp"
+  defaultRtspTransport* = "udp"
   defaultPathctlPath* = "/usr/local/sbin/mediamtx-pathctl"
   cameraSlotIds* = ["cam1", "cam2", "cam3", "cam4"]
 
@@ -77,7 +77,7 @@ proc validateTransport*(value: string): string =
   if t.len == 0:
     return defaultRtspTransport
   case t
-  of "tcp", "udp", "multicast", "automatic":
+  of "udp", "automatic", "tcp", "multicast":
     result = t
   else:
     raise newException(ValueError, &"invalid RTSP transport: {value}")

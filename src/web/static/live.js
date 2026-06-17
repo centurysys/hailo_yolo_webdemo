@@ -376,7 +376,7 @@ function openCameraDialog(slot) {
   cameraIdInput.value = slot.id;
   cameraNameInput.value = slot.name || defaultSlotName(slot.id);
   cameraSourceInput.value = slot.source || '';
-  cameraTransportInput.value = slot.rtspTransport || 'tcp';
+  cameraTransportInput.value = slot.rtspTransport || 'udp';
 
   // New camera slots should become usable with a single Save after the user
   // enters an RTSP URL. Existing disabled slots keep their saved state unless
