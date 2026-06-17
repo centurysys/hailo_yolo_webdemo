@@ -2,14 +2,15 @@
 ##
 ## This step keeps the existing MediaMTX proxy relay mode, ffmpeg copy-relay
 ## mode, external-worker mode, and in-process mode.  The in-process worker now
-## exposes a small status snapshot so the session controller can report ffmpeg
-## PID, exit code, and unexpected relay exit while /api/live/session is polled.
+## exposes relay status and optional async live inference monitor status while
+## /api/live/session is polled.
 
 import std/[json, locks, os, osproc, streams, strformat, strutils, times]
 
 import ./cameras
 import ./live_target
 import ./in_process_worker
+import ./live_infer_owner
 
 const
   defaultRtspBaseUrl* = "rtsp://127.0.0.1:8554"
@@ -17,7 +18,7 @@ const
   defaultFfmpegPath* = "/usr/bin/ffmpeg"
   defaultExternalWorkerPath* = "/usr/local/bin/hailo-live-worker"
   defaultExternalWorkerArgs* = "--input {input} --output {output}"
-  defaultSessionMode* = "mediamtx-proxy"
+  defaultSessionMode* = "in-process"
 
 type
   LiveSessionState* = object
@@ -42,6 +43,21 @@ type
     decodeProbeHeight*: int
     decodeProbeMs*: int
     decodeProbeMessage*: string
+    liveInferAttempted*: bool
+    liveInferOk*: bool
+    liveInferFrames*: int
+    liveInferWidth*: int
+    liveInferHeight*: int
+    liveInferDetections*: int
+    liveInferMaxScorePercent*: int
+    liveInferThroughputFps*: float64
+    liveInferProcessingMs*: int
+    liveInferReadMs*: int
+    liveInferLetterboxMs*: int
+    liveInferWaitMs*: int
+    liveInferHailoWriteUs*: int64
+    liveInferHailoReadUs*: int64
+    liveInferMessage*: string
     message*: string
     startedAt*: string
     stoppedAt*: string
@@ -61,6 +77,8 @@ type
     sessionMode: string
     relayProcess: Process
     inProcessWorker: InProcessLiveWorker
+    retiredInProcessWorkers: seq[InProcessLiveWorker]
+    liveInferOwner: LiveInferOwner
     state: LiveSessionState
 
 proc utcStamp(): string =
@@ -181,6 +199,21 @@ proc sessionToJson(state: LiveSessionState): JsonNode =
   result["decodeProbeHeight"] = %state.decodeProbeHeight
   result["decodeProbeMs"] = %state.decodeProbeMs
   result["decodeProbeMessage"] = %state.decodeProbeMessage
+  result["liveInferAttempted"] = %state.liveInferAttempted
+  result["liveInferOk"] = %state.liveInferOk
+  result["liveInferFrames"] = %state.liveInferFrames
+  result["liveInferWidth"] = %state.liveInferWidth
+  result["liveInferHeight"] = %state.liveInferHeight
+  result["liveInferDetections"] = %state.liveInferDetections
+  result["liveInferMaxScorePercent"] = %state.liveInferMaxScorePercent
+  result["liveInferThroughputFps"] = %state.liveInferThroughputFps
+  result["liveInferProcessingMs"] = %state.liveInferProcessingMs
+  result["liveInferReadMs"] = %state.liveInferReadMs
+  result["liveInferLetterboxMs"] = %state.liveInferLetterboxMs
+  result["liveInferWaitMs"] = %state.liveInferWaitMs
+  result["liveInferHailoWriteUs"] = %state.liveInferHailoWriteUs
+  result["liveInferHailoReadUs"] = %state.liveInferHailoReadUs
+  result["liveInferMessage"] = %state.liveInferMessage
   result["message"] = %state.message
   result["startedAt"] = %state.startedAt
   result["stoppedAt"] = %state.stoppedAt
@@ -206,6 +239,21 @@ proc markStoppedLocked(controller: LiveSessionController; message: string; statu
   controller.state.decodeProbeHeight = 0
   controller.state.decodeProbeMs = 0
   controller.state.decodeProbeMessage = ""
+  controller.state.liveInferAttempted = false
+  controller.state.liveInferOk = false
+  controller.state.liveInferFrames = 0
+  controller.state.liveInferWidth = 0
+  controller.state.liveInferHeight = 0
+  controller.state.liveInferDetections = 0
+  controller.state.liveInferMaxScorePercent = 0
+  controller.state.liveInferThroughputFps = 0.0
+  controller.state.liveInferProcessingMs = 0
+  controller.state.liveInferReadMs = 0
+  controller.state.liveInferLetterboxMs = 0
+  controller.state.liveInferWaitMs = 0
+  controller.state.liveInferHailoWriteUs = 0
+  controller.state.liveInferHailoReadUs = 0
+  controller.state.liveInferMessage = ""
   controller.state.stoppedAt = utcStamp()
 
 proc refreshProcessStateLocked(controller: LiveSessionController) =
@@ -239,6 +287,21 @@ proc refreshInProcessStateLocked(controller: LiveSessionController) =
   controller.state.decodeProbeHeight = snap.decodeProbeHeight
   controller.state.decodeProbeMs = snap.decodeProbeMs
   controller.state.decodeProbeMessage = snap.decodeProbeMessage
+  controller.state.liveInferAttempted = snap.liveInferAttempted
+  controller.state.liveInferOk = snap.liveInferOk
+  controller.state.liveInferFrames = snap.liveInferFrames
+  controller.state.liveInferWidth = snap.liveInferWidth
+  controller.state.liveInferHeight = snap.liveInferHeight
+  controller.state.liveInferDetections = snap.liveInferDetections
+  controller.state.liveInferMaxScorePercent = snap.liveInferMaxScorePercent
+  controller.state.liveInferThroughputFps = snap.liveInferThroughputFps
+  controller.state.liveInferProcessingMs = snap.liveInferProcessingMs
+  controller.state.liveInferReadMs = snap.liveInferReadMs
+  controller.state.liveInferLetterboxMs = snap.liveInferLetterboxMs
+  controller.state.liveInferWaitMs = snap.liveInferWaitMs
+  controller.state.liveInferHailoWriteUs = snap.liveInferHailoWriteUs
+  controller.state.liveInferHailoReadUs = snap.liveInferHailoReadUs
+  controller.state.liveInferMessage = snap.liveInferMessage
   if snap.message.len > 0:
     controller.state.message = snap.message
 
@@ -389,7 +452,8 @@ proc startInProcessWorkerLocked(
       outputRtsp,
       slot.id,
       slot.name,
-      controller.ffmpegPath
+      controller.ffmpegPath,
+      liveInferOwner = controller.liveInferOwner
     )
     let snap = controller.inProcessWorker.snapshot()
     controller.state.relayPid = snap.relayPid
@@ -401,12 +465,32 @@ proc startInProcessWorkerLocked(
     controller.state.decodeProbeHeight = snap.decodeProbeHeight
     controller.state.decodeProbeMs = snap.decodeProbeMs
     controller.state.decodeProbeMessage = snap.decodeProbeMessage
+    controller.state.liveInferAttempted = snap.liveInferAttempted
+    controller.state.liveInferOk = snap.liveInferOk
+    controller.state.liveInferFrames = snap.liveInferFrames
+    controller.state.liveInferWidth = snap.liveInferWidth
+    controller.state.liveInferHeight = snap.liveInferHeight
+    controller.state.liveInferDetections = snap.liveInferDetections
+    controller.state.liveInferMaxScorePercent = snap.liveInferMaxScorePercent
+    controller.state.liveInferThroughputFps = snap.liveInferThroughputFps
+    controller.state.liveInferProcessingMs = snap.liveInferProcessingMs
+    controller.state.liveInferReadMs = snap.liveInferReadMs
+    controller.state.liveInferLetterboxMs = snap.liveInferLetterboxMs
+    controller.state.liveInferWaitMs = snap.liveInferWaitMs
+    controller.state.liveInferHailoWriteUs = snap.liveInferHailoWriteUs
+    controller.state.liveInferHailoReadUs = snap.liveInferHailoReadUs
+    controller.state.liveInferMessage = snap.liveInferMessage
     controller.state.status = "running"
     controller.state.running = true
     controller.state.message = &"in-process live worker is starting /{slot.mediamtxPath} -> /{outputPath} with ffmpeg copy relay; inference stage is not connected yet"
   except CatchableError as e:
     if controller.inProcessWorker != nil:
-      controller.inProcessWorker.close()
+      let oldWorker = controller.inProcessWorker
+      try:
+        oldWorker.close()
+      except CatchableError:
+        discard
+      controller.retiredInProcessWorkers.add(oldWorker)
       controller.inProcessWorker = nil
     controller.state.status = "error"
     controller.state.running = false
@@ -530,7 +614,8 @@ proc newLiveSessionController*(
     ffmpegPath = defaultFfmpegPath;
     externalWorkerPath = defaultExternalWorkerPath;
     externalWorkerArgsTemplate = defaultExternalWorkerArgs;
-    sessionMode = defaultSessionMode
+    sessionMode = defaultSessionMode;
+    liveInferOwner: LiveInferOwner = nil
   ): LiveSessionController =
   new(result)
   initLock(result.lock)
@@ -542,6 +627,8 @@ proc newLiveSessionController*(
   result.sessionMode = normalizeSessionMode(sessionMode)
   result.relayProcess = nil
   result.inProcessWorker = nil
+  result.retiredInProcessWorkers = newSeqOfCap[InProcessLiveWorker](4)
+  result.liveInferOwner = liveInferOwner
   result.state = defaultState(result.rtspBaseUrl)
 
 proc sessionJson*(controller: LiveSessionController): string {.gcsafe.} =
@@ -559,10 +646,23 @@ proc currentState*(controller: LiveSessionController): LiveSessionState {.gcsafe
 proc stopInProcessWorkerLocked(controller: LiveSessionController) =
   if controller.inProcessWorker.isNil:
     return
+
+  # Keep the closed worker object alive instead of letting ORC reclaim it
+  # during the stop request.  The in-process worker state contains strings,
+  # locks and thread-owned objects that were touched from the worker thread.
+  # In earlier live inference experiments, dropping the last ref here could
+  # crash in ORC/shared allocator cleanup after the worker thread had stopped.
+  #
+  # This is a demo service and live sessions are expected to be started/stopped
+  # only a small number of times.  Retiring the closed worker avoids the fragile
+  # teardown path while still marking the session as stopped and allowing a new
+  # worker to be started.
+  let oldWorker = controller.inProcessWorker
   try:
-    controller.inProcessWorker.close()
+    oldWorker.close()
   except CatchableError:
     discard
+  controller.retiredInProcessWorkers.add(oldWorker)
   controller.inProcessWorker = nil
 
 
