@@ -8,13 +8,20 @@ import mummy, mummy/routers
 import ../config
 import ../jobs/store
 import ../live/cameras
+import ../live/live_session
 import ../live/live_target
 import ./handlers
 
-proc startServer*(jobStore: JobStore; cameraStore: LiveCameraStore; targetStore: LiveTargetStore) =
+proc startServer*(
+    jobStore: JobStore;
+    cameraStore: LiveCameraStore;
+    targetStore: LiveTargetStore;
+    sessionController: LiveSessionController
+  ) =
   setJobStore(jobStore)
   setLiveCameraStore(cameraStore)
   setLiveTargetStore(targetStore)
+  setLiveSessionController(sessionController)
 
   var router: Router
   router.get("/", handleIndex)
@@ -26,6 +33,9 @@ proc startServer*(jobStore: JobStore; cameraStore: LiveCameraStore; targetStore:
   router.get("/api/live/target", handleApiLiveTarget)
   router.put("/api/live/target/*", handleApiLiveTargetSet)
   router.delete("/api/live/target", handleApiLiveTargetClear)
+  router.get("/api/live/session", handleApiLiveSession)
+  router.post("/api/live/session/start", handleApiLiveSessionStart)
+  router.post("/api/live/session/stop", handleApiLiveSessionStop)
   router.put("/api/live/cameras/*", handleApiLiveCameraSet)
   router.delete("/api/live/cameras/*", handleApiLiveCameraDelete)
   router.get("/result/*", handleResult)

@@ -115,6 +115,19 @@ proc targetJson*(store: LiveTargetStore): string {.gcsafe.} =
     withLock store.lock:
       result = pretty(targetToJson(store.state)) & "\n"
 
+proc getTargetState*(store: LiveTargetStore): LiveTargetState {.gcsafe.} =
+  {.cast(gcsafe).}:
+    withLock store.lock:
+      result = store.state
+
+proc setPipelineState*(store: LiveTargetStore; status: string; running: bool; message: string) {.gcsafe.} =
+  {.cast(gcsafe).}:
+    withLock store.lock:
+      store.state.pipelineStatus = status
+      store.state.running = running
+      store.state.message = message
+      store.saveLocked()
+
 proc selectTarget*(store: LiveTargetStore; cameras: LiveCameraStore; cameraId: string): LiveTargetState {.gcsafe.} =
   {.cast(gcsafe).}:
     if not cameraId.isValidSlotId:

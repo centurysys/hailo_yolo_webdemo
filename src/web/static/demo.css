@@ -362,3 +362,17 @@ button.danger {
   .live-status-list > div { grid-template-columns: 1fr; gap: 0.2rem; }
   .live-page-header, .panel-heading { align-items: flex-start; }
 }
+.session-actions {
+  display: flex;
+  gap: 0.65rem;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  margin: 0.65rem 0 0.9rem;
+}
+.session-actions button {
+  margin: 0;
+}
+#session-message {
+  max-height: 4.5rem;
+  overflow: auto;
+}

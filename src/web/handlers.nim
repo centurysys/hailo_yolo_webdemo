@@ -7,6 +7,7 @@ import ../config
 import ../jobs/[runner, store]
 import ../live/cameras
 import ../live/live_target
+import ../live/live_session
 import ../types
 import ../util/[ids, paths]
 import ./pages
@@ -15,6 +16,7 @@ import ./api
 var gStorePtr: pointer
 var gCameraStorePtr: pointer
 var gTargetStorePtr: pointer
+var gSessionControllerPtr: pointer
 
 proc setJobStore*(store: JobStore) =
   ## Keep only an untraced pointer in global state so Mummy handler procs stay
@@ -44,6 +46,13 @@ proc setLiveTargetStore*(store: LiveTargetStore) =
 proc currentLiveTargetStore(): LiveTargetStore {.gcsafe.} =
   {.cast(gcsafe).}:
     result = cast[LiveTargetStore](gTargetStorePtr)
+
+proc setLiveSessionController*(controller: LiveSessionController) =
+  gSessionControllerPtr = cast[pointer](controller)
+
+proc currentLiveSessionController(): LiveSessionController {.gcsafe.} =
+  {.cast(gcsafe).}:
+    result = cast[LiveSessionController](gSessionControllerPtr)
 
 proc respondText(request: Request, status: int, text: string) {.gcsafe.} =
   var headers: HttpHeaders
@@ -311,6 +320,9 @@ proc handleApiLiveCameraDelete*(request: Request) {.gcsafe.} =
     let targetStore = currentLiveTargetStore()
     if targetStore != nil:
       targetStore.clearIfSelected(cameraId)
+    let session = currentLiveSessionController()
+    if session != nil:
+      discard session.stopSession(targetStore)
     request.respondJson(200, body)
   except ValueError as e:
     request.respondText(400, e.msg)
@@ -354,7 +366,51 @@ proc handleApiLiveTargetClear*(request: Request) {.gcsafe.} =
     return
 
   try:
+    let session = currentLiveSessionController()
+    if session != nil:
+      discard session.stopSession(store)
     request.respondJson(200, store.clearTargetJson())
+  except CatchableError as e:
+    request.respondText(500, e.msg)
+
+proc handleApiLiveSession*(request: Request) {.gcsafe.} =
+  let session = currentLiveSessionController()
+  if session == nil:
+    request.respondText(500, "live session controller is not initialized")
+    return
+
+  request.respondJson(200, session.sessionJson())
+
+proc handleApiLiveSessionStart*(request: Request) {.gcsafe.} =
+  let session = currentLiveSessionController()
+  let cameraStore = currentCameraStore()
+  let targetStore = currentLiveTargetStore()
+  if session == nil:
+    request.respondText(500, "live session controller is not initialized")
+    return
+  if cameraStore == nil:
+    request.respondText(500, "live camera store is not initialized")
+    return
+  if targetStore == nil:
+    request.respondText(500, "live target store is not initialized")
+    return
+
+  try:
+    request.respondJson(200, session.prepareSessionJson(cameraStore, targetStore))
+  except ValueError as e:
+    request.respondText(400, e.msg)
+  except CatchableError as e:
+    request.respondText(500, e.msg)
+
+proc handleApiLiveSessionStop*(request: Request) {.gcsafe.} =
+  let session = currentLiveSessionController()
+  let targetStore = currentLiveTargetStore()
+  if session == nil:
+    request.respondText(500, "live session controller is not initialized")
+    return
+
+  try:
+    request.respondJson(200, session.stopSessionJson(targetStore))
   except CatchableError as e:
     request.respondText(500, e.msg)
 

@@ -6,6 +6,11 @@ const selectedName = document.getElementById('selected-camera-name');
 const selectedWebrtcLink = document.getElementById('selected-webrtc-link');
 const aiWebrtcLink = document.getElementById('ai-webrtc-link');
 const aiPipelineStatus = document.getElementById('ai-pipeline-status');
+const sessionStartButton = document.getElementById('session-start');
+const sessionStopButton = document.getElementById('session-stop');
+const sessionInputRtsp = document.getElementById('session-input-rtsp');
+const sessionOutputRtsp = document.getElementById('session-output-rtsp');
+const sessionMessage = document.getElementById('session-message');
 
 const dialog = document.getElementById('camera-dialog');
 const dialogTitle = document.getElementById('camera-dialog-title');
@@ -27,6 +32,20 @@ let liveTarget = {
   pipelineStatus: 'not-started',
   running: false,
   message: 'no camera selected',
+};
+let liveSession = {
+  status: 'stopped',
+  running: false,
+  selectedCameraId: '',
+  selectedCameraName: '',
+  inputMediamtxPath: '',
+  inputRtspUrl: '',
+  outputMediamtxPath: 'cam-ai',
+  outputRtspUrl: 'rtsp://127.0.0.1:8554/cam-ai',
+  aiWebrtcPath: '/cam-ai',
+  message: 'live inference pipeline is stopped',
+  startedAt: '',
+  stoppedAt: '',
 };
 
 function setMessage(text, isError = false) {
@@ -50,7 +69,7 @@ function hlsUrl(slot) {
 }
 
 function aiWebrtcUrl() {
-  return absoluteMediaUrl(8889, liveTarget.aiWebrtcPath || '/cam-ai');
+  return absoluteMediaUrl(8889, liveSession.aiWebrtcPath || liveTarget.aiWebrtcPath || '/cam-ai');
 }
 
 function defaultSlotName(slotId) {
@@ -66,12 +85,28 @@ function findSlot(slotId) {
   return slots.find((slot) => slot.id === slotId) || null;
 }
 
+function hasSelectableTarget() {
+  const slot = findSlot(selectedCameraId());
+  return Boolean(slot && slot.enabled && slot.source);
+}
+
+function updateSessionPanel() {
+  const status = liveSession.status || liveTarget.pipelineStatus || 'stopped';
+  aiPipelineStatus.textContent = status;
+  sessionInputRtsp.textContent = liveSession.inputRtspUrl || 'not prepared';
+  sessionOutputRtsp.textContent = liveSession.outputRtspUrl || 'not prepared';
+  sessionMessage.textContent = liveSession.message || liveTarget.message || '';
+
+  const canPrepare = hasSelectableTarget() && status !== 'prepared' && status !== 'running' && status !== 'starting';
+  sessionStartButton.disabled = !canPrepare;
+  sessionStopButton.disabled = status === 'stopped' || status === 'not-started';
+}
+
 function updateSelectedPanel() {
   const slot = findSlot(selectedCameraId());
   const aiUrl = aiWebrtcUrl();
   aiWebrtcLink.href = aiUrl;
   aiWebrtcLink.textContent = aiUrl;
-  aiPipelineStatus.textContent = liveTarget.pipelineStatus || 'not-started';
 
   if (!slot || !slot.enabled || !slot.source) {
     selectedBadge.textContent = 'not selected';
@@ -79,6 +114,7 @@ function updateSelectedPanel() {
     selectedName.textContent = 'None';
     selectedWebrtcLink.removeAttribute('href');
     selectedWebrtcLink.textContent = 'not available';
+    updateSessionPanel();
     return;
   }
 
@@ -87,6 +123,7 @@ function updateSelectedPanel() {
   selectedName.textContent = slot.name || slot.id;
   selectedWebrtcLink.href = webrtcUrl(slot);
   selectedWebrtcLink.textContent = webrtcUrl(slot);
+  updateSessionPanel();
 }
 
 function renderCameraCard(slot) {
@@ -202,6 +239,12 @@ async function loadLiveTarget() {
   liveTarget = await res.json();
 }
 
+async function loadLiveSession() {
+  const res = await fetch('/api/live/session', { cache: 'no-store' });
+  if (!res.ok) throw new Error(await res.text());
+  liveSession = await res.json();
+}
+
 async function loadCameras() {
   setMessage('loading cameras...');
   try {
@@ -210,6 +253,7 @@ async function loadCameras() {
     const data = await res.json();
     slots = Array.isArray(data.slots) ? data.slots : [];
     await loadLiveTarget();
+    await loadLiveSession();
     renderCameraGrid();
     setMessage('');
   } catch (err) {
@@ -291,6 +335,7 @@ async function selectCamera(cameraId) {
     const res = await fetch('/api/live/target/' + encodeURIComponent(cameraId), { method: 'PUT' });
     if (!res.ok) throw new Error(await res.text());
     liveTarget = await res.json();
+    await loadLiveSession();
     renderCameraGrid();
     setMessage(`${cameraId} selected as AI target`);
   } catch (err) {
@@ -298,7 +343,37 @@ async function selectCamera(cameraId) {
   }
 }
 
+async function prepareSession() {
+  try {
+    setMessage('preparing live AI route...');
+    const res = await fetch('/api/live/session/start', { method: 'POST' });
+    if (!res.ok) throw new Error(await res.text());
+    liveSession = await res.json();
+    await loadLiveTarget();
+    updateSelectedPanel();
+    setMessage(liveSession.message || 'live AI route prepared');
+  } catch (err) {
+    setMessage('error: ' + err.message, true);
+  }
+}
+
+async function stopSession() {
+  try {
+    setMessage('stopping live AI route...');
+    const res = await fetch('/api/live/session/stop', { method: 'POST' });
+    if (!res.ok) throw new Error(await res.text());
+    liveSession = await res.json();
+    await loadLiveTarget();
+    updateSelectedPanel();
+    setMessage('live AI route stopped');
+  } catch (err) {
+    setMessage('error: ' + err.message, true);
+  }
+}
+
 refreshButton.addEventListener('click', loadCameras);
+sessionStartButton.addEventListener('click', prepareSession);
+sessionStopButton.addEventListener('click', stopSession);
 cameraForm.addEventListener('submit', saveCamera);
 cameraDeleteButton.addEventListener('click', deleteCamera);
 cameraCancelButton.addEventListener('click', closeCameraDialog);

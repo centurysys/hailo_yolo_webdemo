@@ -21,6 +21,7 @@ const
   liveCameraConfigPath* = stateRoot & "/live-cameras.json"
   liveTargetConfigPath* = stateRoot & "/live-target.json"
   mediamtxPathctlPath* = "/usr/local/sbin/mediamtx-pathctl"
+  liveRtspBaseUrl* = "rtsp://127.0.0.1:8554"
 
   hefPath* = "/usr/local/share/hailo-demo/yolov11s.hef"
   fontPath* = "/usr/share/fonts/dejavu/DejaVuSans.ttf"

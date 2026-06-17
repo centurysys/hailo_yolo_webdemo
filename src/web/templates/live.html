@@ -31,6 +31,11 @@
         </div>
       </div>
 
+      <div class="session-actions" aria-label="Live inference session controls">
+        <button id="session-start" type="button">Prepare AI route</button>
+        <button id="session-stop" class="secondary" type="button">Stop</button>
+      </div>
+
       <dl class="live-status-list">
         <div>
           <dt>Selected camera</dt>
@@ -46,7 +51,19 @@
         </div>
         <div>
           <dt>Pipeline status</dt>
-          <dd id="ai-pipeline-status">not-started</dd>
+          <dd id="ai-pipeline-status">stopped</dd>
+        </div>
+        <div>
+          <dt>Input RTSP</dt>
+          <dd id="session-input-rtsp" class="muted">not prepared</dd>
+        </div>
+        <div>
+          <dt>Output RTSP</dt>
+          <dd id="session-output-rtsp" class="muted">not prepared</dd>
+        </div>
+        <div>
+          <dt>Session message</dt>
+          <dd id="session-message" class="muted">not prepared</dd>
         </div>
       </dl>
     </aside>
