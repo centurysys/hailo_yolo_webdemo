@@ -6,7 +6,7 @@ description   = "HAILO YOLOv11s web demo appliance"
 license       = "MIT"
 srcDir        = "src"
 binDir        = "bin"
-bin           = @["hailo_yolo_webdemo"]
+bin           = @["hailo_yolo_webdemo", "hailo_live_worker"]
 
 
 # Dependencies
