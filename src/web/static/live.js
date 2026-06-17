@@ -321,8 +321,15 @@ function renderCameraCard(slot) {
   select.type = 'button';
   select.className = selected ? '' : 'secondary';
   select.disabled = !configured;
-  select.textContent = selected ? 'Selected' : 'AI target';
-  select.addEventListener('click', () => selectCamera(slot.id));
+  select.textContent = selected ? 'Clear target' : 'AI target';
+  select.title = selected ? 'Clear the selected AI target' : `Use ${slot.id} as the AI target`;
+  select.addEventListener('click', () => {
+    if (selected) {
+      clearAiTarget();
+    } else {
+      selectCamera(slot.id);
+    }
+  });
   actions.appendChild(select);
 
   card.appendChild(actions);
@@ -363,12 +370,20 @@ async function loadCameras() {
 }
 
 function openCameraDialog(slot) {
+  const hasSavedSource = Boolean(String(slot.source || '').trim());
+  const hasSavedState = Boolean(slot.enabled || hasSavedSource);
+
   cameraIdInput.value = slot.id;
   cameraNameInput.value = slot.name || defaultSlotName(slot.id);
   cameraSourceInput.value = slot.source || '';
   cameraTransportInput.value = slot.rtspTransport || 'tcp';
-  cameraEnabledInput.checked = Boolean(slot.enabled || slot.source);
-  cameraDeleteButton.hidden = !(slot.enabled || slot.source);
+
+  // New camera slots should become usable with a single Save after the user
+  // enters an RTSP URL. Existing disabled slots keep their saved state unless
+  // the user explicitly changes the checkbox.
+  cameraEnabledInput.checked = hasSavedState ? Boolean(slot.enabled || hasSavedSource) : true;
+  cameraEnabledInput.dataset.userChanged = '0';
+  cameraDeleteButton.hidden = !hasSavedState;
   dialogTitle.textContent = `${slot.id} settings`;
 
   if (typeof dialog.showModal === 'function') {
@@ -389,11 +404,12 @@ function closeCameraDialog() {
 async function saveCamera(event) {
   event.preventDefault();
   const cameraId = cameraIdInput.value;
+  const source = cameraSourceInput.value.trim();
   const body = {
     name: cameraNameInput.value.trim() || defaultSlotName(cameraId),
-    source: cameraSourceInput.value.trim(),
+    source,
     rtspTransport: cameraTransportInput.value,
-    enabled: cameraEnabledInput.checked,
+    enabled: Boolean(source) && cameraEnabledInput.checked,
   };
 
   try {
@@ -439,6 +455,32 @@ async function selectCamera(cameraId) {
     await loadLiveSession();
     renderCameraGrid();
     setMessage(`${cameraId} selected as AI target`);
+  } catch (err) {
+    setMessage('error: ' + err.message, true);
+  }
+}
+
+async function clearAiTarget() {
+  const status = liveSession.status || liveTarget.pipelineStatus || 'stopped';
+  if (liveSession.running || status === 'running' || status === 'starting') {
+    setMessage('stop live AI relay before clearing the AI target', true);
+    return;
+  }
+
+  try {
+    setMessage('clearing AI target...');
+    const res = await fetch('/api/live/target', { method: 'DELETE' });
+    const text = await res.text();
+    if (!res.ok) throw new Error(text || res.statusText);
+
+    if (text.trim()) {
+      liveTarget = JSON.parse(text);
+    } else {
+      await loadLiveTarget();
+    }
+    await loadLiveSession();
+    renderCameraGrid();
+    setMessage('AI target cleared');
   } catch (err) {
     setMessage('error: ' + err.message, true);
   }
@@ -499,6 +541,14 @@ refreshButton.addEventListener('click', loadCameras);
 sessionStartButton.addEventListener('click', prepareSession);
 sessionStopButton.addEventListener('click', stopSession);
 cameraForm.addEventListener('submit', saveCamera);
+cameraSourceInput.addEventListener('input', () => {
+  if (cameraSourceInput.value.trim() && cameraEnabledInput.dataset.userChanged !== '1') {
+    cameraEnabledInput.checked = true;
+  }
+});
+cameraEnabledInput.addEventListener('change', () => {
+  cameraEnabledInput.dataset.userChanged = '1';
+});
 cameraDeleteButton.addEventListener('click', deleteCamera);
 cameraCancelButton.addEventListener('click', closeCameraDialog);
 cameraDialogCloseButton.addEventListener('click', closeCameraDialog);
