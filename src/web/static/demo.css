@@ -396,6 +396,15 @@ button.danger {
 .settings-actions button {
   margin: 0;
 }
+.settings-note {
+  margin: 0.5rem 0 0;
+  font-size: 0.88rem;
+  line-height: 1.45;
+}
+.settings-actions .settings-save-dirty {
+  font-weight: 700;
+  box-shadow: 0 0 0 2px color-mix(in srgb, #0969da 28%, transparent);
+}
 
 #session-message {
   max-height: 4.5rem;

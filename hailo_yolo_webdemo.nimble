@@ -7,7 +7,7 @@ license       = "MIT"
 srcDir        = "src"
 binDir        = "bin"
 bin           = @[
-#    "hailo_live_rtsp_publish_probe",
+#    "hailo_live_copy_relay_probe"
     "hailo_yolo_webdemo"
 ]
 

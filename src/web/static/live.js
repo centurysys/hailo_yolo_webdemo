@@ -12,6 +12,10 @@ const sessionStopButton = document.getElementById('session-stop');
 const sessionInputRtsp = document.getElementById('session-input-rtsp');
 const sessionOutputRtsp = document.getElementById('session-output-rtsp');
 const sessionMessage = document.getElementById('session-message');
+const liveDebugOverlayInput = document.getElementById('live-debug-overlay');
+const liveSettingsSaveButton = document.getElementById('live-settings-save');
+const liveSettingsStatus = document.getElementById('live-settings-status');
+const liveSettingsEditState = document.getElementById('live-settings-edit-state');
 
 const dialog = document.getElementById('camera-dialog');
 const dialogTitle = document.getElementById('camera-dialog-title');
@@ -48,6 +52,12 @@ let liveSession = {
   startedAt: '',
   stoppedAt: '',
 };
+let liveSettings = {
+  debugOverlay: true,
+  canEdit: true,
+};
+let liveSettingsDirty = false;
+let liveSettingsSaving = false;
 
 let previewReloadSerial = 0;
 let previewResyncButton = null;
@@ -154,6 +164,116 @@ function hasSelectableTarget() {
 }
 
 
+function liveSessionIsEditable() {
+  const status = String(liveSession.status || liveTarget.pipelineStatus || 'stopped').toLowerCase();
+  return !(liveSession.running || status === 'running' || status === 'starting' || status === 'stopping');
+}
+
+function currentLiveSettingsFormValue() {
+  return {
+    debugOverlay: Boolean(liveDebugOverlayInput && liveDebugOverlayInput.checked),
+  };
+}
+
+function liveSettingsFormMatchesSaved() {
+  if (!liveDebugOverlayInput) return true;
+  return Boolean(liveDebugOverlayInput.checked) === Boolean(liveSettings.debugOverlay);
+}
+
+function updateLiveSettingsDirtyFromForm() {
+  liveSettingsDirty = !liveSettingsFormMatchesSaved();
+}
+
+function updateLiveSettingsPanel(options = {}) {
+  if (!liveDebugOverlayInput || !liveSettingsSaveButton) return;
+  const canEdit = Boolean(liveSettings.canEdit && liveSessionIsEditable());
+  const preserveForm = Boolean(options.preserveForm || liveSettingsDirty || liveSettingsSaving);
+
+  if (!preserveForm) {
+    liveDebugOverlayInput.checked = Boolean(liveSettings.debugOverlay);
+    liveSettingsDirty = false;
+  }
+
+  liveDebugOverlayInput.disabled = !canEdit || liveSettingsSaving;
+
+  if (!canEdit) {
+    liveSettingsSaveButton.disabled = true;
+    liveSettingsSaveButton.textContent = 'Stop to edit';
+    liveSettingsSaveButton.classList.add('secondary');
+    liveSettingsSaveButton.classList.remove('settings-save-dirty');
+    if (liveSettingsStatus) liveSettingsStatus.textContent = 'running - setting is locked';
+  } else if (liveSettingsSaving) {
+    liveSettingsSaveButton.disabled = true;
+    liveSettingsSaveButton.textContent = 'Saving...';
+    liveSettingsSaveButton.classList.add('secondary');
+    liveSettingsSaveButton.classList.remove('settings-save-dirty');
+    if (liveSettingsStatus) liveSettingsStatus.textContent = 'saving...';
+  } else if (liveSettingsDirty) {
+    liveSettingsSaveButton.disabled = false;
+    liveSettingsSaveButton.textContent = 'Save changes';
+    liveSettingsSaveButton.classList.remove('secondary');
+    liveSettingsSaveButton.classList.add('settings-save-dirty');
+    if (liveSettingsStatus) liveSettingsStatus.textContent = 'changed - applies on next Start';
+  } else {
+    liveSettingsSaveButton.disabled = true;
+    liveSettingsSaveButton.textContent = 'Saved';
+    liveSettingsSaveButton.classList.add('secondary');
+    liveSettingsSaveButton.classList.remove('settings-save-dirty');
+    if (liveSettingsStatus) liveSettingsStatus.textContent = 'current';
+  }
+
+  if (liveSettingsEditState) {
+    liveSettingsEditState.textContent = canEdit ? 'editable while stopped' : 'stop AI preview to edit';
+  }
+}
+
+async function loadLiveSettings() {
+  const res = await fetch('/api/live/settings', { cache: 'no-store' });
+  if (!res.ok) throw new Error(await res.text());
+  liveSettings = await res.json();
+  liveSettingsDirty = false;
+}
+
+async function saveLiveSettings(options = {}) {
+  if (!liveDebugOverlayInput) return liveSettings;
+  const quiet = Boolean(options.quiet);
+
+  updateLiveSettingsDirtyFromForm();
+  if (!liveSettingsDirty) {
+    updateLiveSettingsPanel();
+    return liveSettings;
+  }
+
+  try {
+    liveSettingsSaving = true;
+    updateLiveSettingsPanel({ preserveForm: true });
+    const res = await fetch('/api/live/settings', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(currentLiveSettingsFormValue()),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    liveSettings = await res.json();
+    liveSettingsDirty = false;
+    if (!quiet) setMessage('live AI settings saved');
+    return liveSettings;
+  } catch (err) {
+    if (!quiet) setMessage('error: ' + err.message, true);
+    throw err;
+  } finally {
+    liveSettingsSaving = false;
+    updateLiveSettingsPanel();
+  }
+}
+
+async function saveLiveSettingsBeforeStart() {
+  updateLiveSettingsDirtyFromForm();
+  if (liveSettingsDirty) {
+    setMessage('saving live AI settings before start...');
+    await saveLiveSettings({ quiet: true });
+  }
+}
+
 function renderAiPreviewBox() {
   if (!aiPreviewBox) return;
   const status = liveSession.status || liveTarget.pipelineStatus || 'stopped';
@@ -201,6 +321,7 @@ function updateSessionPanel() {
   const canPrepare = hasSelectableTarget() && status !== 'running' && status !== 'starting';
   sessionStartButton.disabled = !canPrepare;
   sessionStopButton.disabled = !(liveSession.running || status === 'running' || status === 'starting');
+  updateLiveSettingsPanel();
 }
 
 function updateSelectedPanel() {
@@ -362,6 +483,7 @@ async function loadCameras() {
     slots = Array.isArray(data.slots) ? data.slots : [];
     await loadLiveTarget();
     await loadLiveSession();
+    await loadLiveSettings();
     renderCameraGrid();
     setMessage('');
   } catch (err) {
@@ -488,11 +610,13 @@ async function clearAiTarget() {
 
 async function prepareSession() {
   try {
+    await saveLiveSettingsBeforeStart();
     setMessage('starting live AI relay...');
     const res = await fetch('/api/live/session/start', { method: 'POST' });
     if (!res.ok) throw new Error(await res.text());
     liveSession = await res.json();
     await loadLiveTarget();
+    await loadLiveSettings();
     updateSelectedPanel();
     schedulePreviewResync('session-start', 1200);
     setMessage(liveSession.message || 'live AI relay started');
@@ -508,6 +632,7 @@ async function stopSession() {
     if (!res.ok) throw new Error(await res.text());
     liveSession = await res.json();
     await loadLiveTarget();
+    await loadLiveSettings();
     updateSelectedPanel();
     setMessage('live AI relay stopped');
   } catch (err) {
@@ -540,6 +665,15 @@ initPreviewResyncButton();
 refreshButton.addEventListener('click', loadCameras);
 sessionStartButton.addEventListener('click', prepareSession);
 sessionStopButton.addEventListener('click', stopSession);
+if (liveSettingsSaveButton) liveSettingsSaveButton.addEventListener('click', () => {
+  saveLiveSettings().catch(() => {});
+});
+if (liveDebugOverlayInput) {
+  liveDebugOverlayInput.addEventListener('change', () => {
+    updateLiveSettingsDirtyFromForm();
+    updateLiveSettingsPanel({ preserveForm: true });
+  });
+}
 cameraForm.addEventListener('submit', saveCamera);
 cameraSourceInput.addEventListener('input', () => {
   if (cameraSourceInput.value.trim() && cameraEnabledInput.dataset.userChanged !== '1') {
