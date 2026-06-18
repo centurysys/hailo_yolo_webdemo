@@ -12,6 +12,7 @@ import ./live_target
 import ./in_process_worker
 import ./live_infer_owner
 import ./settings
+import ../types
 
 const
   defaultRtspBaseUrl* = "rtsp://127.0.0.1:8554"
@@ -514,7 +515,8 @@ proc startInProcessAiWorkerLocked(
     "--input", inputRtsp,
     "--output", outputRtsp,
     "--decoder", getEnv("HAILO_DEMO_LIVE_DECODER", "h264_v4l2m2m"),
-    "--debug-overlay", $liveSettings.debugOverlay
+    "--debug-overlay", $liveSettings.debugOverlay,
+    "--overlay-preset", liveSettings.overlayPreset.toWire
   ]
 
   controller.state = LiveSessionState(
@@ -532,7 +534,7 @@ proc startInProcessAiWorkerLocked(
     relayCommand: "in-process-ai-overlay",
     relayArgs: args,
     lastExitCode: 0,
-    message: &"starting in-process AI overlay pipeline: /{slot.mediamtxPath} -> /{outputPath}",
+    message: &"starting in-process AI overlay pipeline: /{slot.mediamtxPath} -> /{outputPath} debugOverlay={liveSettings.debugOverlay} overlayPreset={liveSettings.overlayPreset.toWire}",
     startedAt: utcStamp(),
     stoppedAt: ""
   )
@@ -546,7 +548,8 @@ proc startInProcessAiWorkerLocked(
       controller.ffmpegPath,
       liveInferOwner = controller.liveInferOwner,
       aiOverlay = true,
-      aiDebugOverlay = liveSettings.debugOverlay
+      aiDebugOverlay = liveSettings.debugOverlay,
+      aiOverlayPreset = liveSettings.overlayPreset
     )
     let snap = controller.inProcessWorker.snapshot()
     controller.state.relayPid = snap.relayPid
@@ -568,7 +571,7 @@ proc startInProcessAiWorkerLocked(
     controller.state.liveInferMessage = snap.liveInferMessage
     controller.state.status = "running"
     controller.state.running = true
-    controller.state.message = &"in-process AI overlay pipeline is publishing /{slot.mediamtxPath} to /{outputPath}"
+    controller.state.message = &"in-process AI overlay pipeline is publishing /{slot.mediamtxPath} to /{outputPath} debugOverlay={liveSettings.debugOverlay} overlayPreset={liveSettings.overlayPreset.toWire}"
   except CatchableError as e:
     if controller.inProcessWorker != nil:
       let oldWorker = controller.inProcessWorker

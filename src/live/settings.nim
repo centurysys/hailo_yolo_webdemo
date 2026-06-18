@@ -7,12 +7,16 @@
 
 import std/[json, locks, os, strformat, strutils]
 
+import ../types
+
 const
   defaultDebugOverlay* = true
+  defaultLiveOverlayPreset* = opBalanced
 
 type
   LiveSettingsState* = object
     debugOverlay*: bool
+    overlayPreset*: OverlayPreset
 
   LiveSettingsStore* = ref object
     lock: Lock
@@ -23,7 +27,10 @@ proc nowPidSuffix(): string =
   $getCurrentProcessId()
 
 proc defaultLiveSettings*(): LiveSettingsState =
-  LiveSettingsState(debugOverlay: defaultDebugOverlay)
+  LiveSettingsState(
+    debugOverlay: defaultDebugOverlay,
+    overlayPreset: defaultLiveOverlayPreset
+  )
 
 proc atomicWrite(path, content: string) =
   let dir = path.splitFile.dir
@@ -32,6 +39,27 @@ proc atomicWrite(path, content: string) =
   let tmpPath = &"{path}.tmp.{nowPidSuffix()}"
   writeFile(tmpPath, content)
   moveFile(tmpPath, path)
+
+
+proc parseLiveOverlayPreset(rawValue: string; defaultValue: OverlayPreset): OverlayPreset =
+  case rawValue.strip().toLowerAscii()
+  of "light", "sparse": opLight
+  of "balanced", "balance", "default": opBalanced
+  of "rich", "dense": opRich
+  of "boxes-only", "boxes_only", "box", "boxes": opBoxesOnly
+  else: defaultValue
+
+proc parseRequestedLiveOverlayPreset(rawValue: string): OverlayPreset =
+  let normalized = rawValue.strip().toLowerAscii()
+  result = parseLiveOverlayPreset(normalized, opManual)
+  if result == opManual:
+    raise newException(ValueError, &"overlayPreset must be one of: light, balanced, rich, boxes-only")
+
+proc getStringField(node: JsonNode, key: string; defaultValue: string): string =
+  if node.kind == JObject and node.hasKey(key) and node[key].kind == JString:
+    result = node[key].getStr()
+  else:
+    result = defaultValue
 
 proc getBoolField(node: JsonNode, key: string; defaultValue: bool): bool =
   if node.kind == JObject and node.hasKey(key) and node[key].kind == JBool:
@@ -44,10 +72,12 @@ proc parseSettingsNode(node: JsonNode): LiveSettingsState =
   if node.kind != JObject:
     return
   result.debugOverlay = node.getBoolField("debugOverlay", result.debugOverlay)
+  result.overlayPreset = parseLiveOverlayPreset(node.getStringField("overlayPreset", result.overlayPreset.toWire), result.overlayPreset)
 
 proc settingsToJsonNode(state: LiveSettingsState; canEdit: bool): JsonNode =
   result = newJObject()
   result["debugOverlay"] = %state.debugOverlay
+  result["overlayPreset"] = %state.overlayPreset.toWire
   result["canEdit"] = %canEdit
 
 proc saveLocked(store: LiveSettingsStore) =
@@ -100,6 +130,11 @@ proc updateSettings*(store: LiveSettingsStore; body: string): LiveSettingsState 
         if root["debugOverlay"].kind != JBool:
           raise newException(ValueError, "debugOverlay must be a boolean")
         next.debugOverlay = root["debugOverlay"].bval
+
+      if root.hasKey("overlayPreset"):
+        if root["overlayPreset"].kind != JString:
+          raise newException(ValueError, "overlayPreset must be a string")
+        next.overlayPreset = parseRequestedLiveOverlayPreset(root["overlayPreset"].getStr())
 
       store.state = next
       store.saveLocked()

@@ -13,6 +13,7 @@ const sessionInputRtsp = document.getElementById('session-input-rtsp');
 const sessionOutputRtsp = document.getElementById('session-output-rtsp');
 const sessionMessage = document.getElementById('session-message');
 const liveDebugOverlayInput = document.getElementById('live-debug-overlay');
+const liveOverlayPresetInput = document.getElementById('live-overlay-preset');
 const liveSettingsSaveButton = document.getElementById('live-settings-save');
 const liveSettingsStatus = document.getElementById('live-settings-status');
 const liveSettingsEditState = document.getElementById('live-settings-edit-state');
@@ -54,6 +55,7 @@ let liveSession = {
 };
 let liveSettings = {
   debugOverlay: true,
+  overlayPreset: 'balanced',
   canEdit: true,
 };
 let liveSettingsDirty = false;
@@ -164,6 +166,15 @@ function hasSelectableTarget() {
 }
 
 
+
+function normalizeLiveOverlayPreset(value) {
+  const normalized = String(value || '').trim().toLowerCase();
+  if (normalized === 'light' || normalized === 'balanced' || normalized === 'rich' || normalized === 'boxes-only') {
+    return normalized;
+  }
+  return 'balanced';
+}
+
 function liveSessionIsEditable() {
   const status = String(liveSession.status || liveTarget.pipelineStatus || 'stopped').toLowerCase();
   return !(liveSession.running || status === 'running' || status === 'starting' || status === 'stopping');
@@ -172,12 +183,15 @@ function liveSessionIsEditable() {
 function currentLiveSettingsFormValue() {
   return {
     debugOverlay: Boolean(liveDebugOverlayInput && liveDebugOverlayInput.checked),
+    overlayPreset: normalizeLiveOverlayPreset(liveOverlayPresetInput && liveOverlayPresetInput.value),
   };
 }
 
 function liveSettingsFormMatchesSaved() {
   if (!liveDebugOverlayInput) return true;
-  return Boolean(liveDebugOverlayInput.checked) === Boolean(liveSettings.debugOverlay);
+  const current = currentLiveSettingsFormValue();
+  return Boolean(current.debugOverlay) === Boolean(liveSettings.debugOverlay)
+    && normalizeLiveOverlayPreset(current.overlayPreset) === normalizeLiveOverlayPreset(liveSettings.overlayPreset);
 }
 
 function updateLiveSettingsDirtyFromForm() {
@@ -191,10 +205,12 @@ function updateLiveSettingsPanel(options = {}) {
 
   if (!preserveForm) {
     liveDebugOverlayInput.checked = Boolean(liveSettings.debugOverlay);
+    if (liveOverlayPresetInput) liveOverlayPresetInput.value = normalizeLiveOverlayPreset(liveSettings.overlayPreset);
     liveSettingsDirty = false;
   }
 
   liveDebugOverlayInput.disabled = !canEdit || liveSettingsSaving;
+  if (liveOverlayPresetInput) liveOverlayPresetInput.disabled = !canEdit || liveSettingsSaving;
 
   if (!canEdit) {
     liveSettingsSaveButton.disabled = true;
@@ -231,6 +247,7 @@ async function loadLiveSettings() {
   const res = await fetch('/api/live/settings', { cache: 'no-store' });
   if (!res.ok) throw new Error(await res.text());
   liveSettings = await res.json();
+  liveSettings.overlayPreset = normalizeLiveOverlayPreset(liveSettings.overlayPreset);
   liveSettingsDirty = false;
 }
 
@@ -254,6 +271,7 @@ async function saveLiveSettings(options = {}) {
     });
     if (!res.ok) throw new Error(await res.text());
     liveSettings = await res.json();
+    liveSettings.overlayPreset = normalizeLiveOverlayPreset(liveSettings.overlayPreset);
     liveSettingsDirty = false;
     if (!quiet) setMessage('live AI settings saved');
     return liveSettings;
@@ -670,6 +688,12 @@ if (liveSettingsSaveButton) liveSettingsSaveButton.addEventListener('click', () 
 });
 if (liveDebugOverlayInput) {
   liveDebugOverlayInput.addEventListener('change', () => {
+    updateLiveSettingsDirtyFromForm();
+    updateLiveSettingsPanel({ preserveForm: true });
+  });
+}
+if (liveOverlayPresetInput) {
+  liveOverlayPresetInput.addEventListener('change', () => {
     updateLiveSettingsDirtyFromForm();
     updateLiveSettingsPanel({ preserveForm: true });
   });

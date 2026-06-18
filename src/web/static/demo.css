@@ -383,6 +383,21 @@ button.danger {
 .live-settings-card h4 {
   margin: 0;
 }
+
+.live-settings-field {
+  display: grid;
+  gap: 0.35rem;
+  margin-top: 0.75rem;
+  font-weight: 700;
+}
+.live-settings-field select {
+  width: 100%;
+  max-width: 18rem;
+}
+.live-settings-help {
+  margin: 0.45rem 0 0;
+  line-height: 1.45;
+}
 .compact-heading {
   margin-bottom: 0.65rem;
 }
@@ -414,4 +429,56 @@ button.danger {
 /* Live page disabled controls should indicate unavailable, not background waiting. */
 .live-page button[disabled] {
   cursor: not-allowed;
+}
+
+/* Compact Live AI settings: keep the control area short for demo screens. */
+.compact-live-settings {
+  padding: 0.6rem 0.7rem;
+}
+.compact-live-settings .compact-heading {
+  margin-bottom: 0.5rem;
+}
+.settings-compact-grid {
+  display: grid;
+  grid-template-columns: minmax(12rem, 1fr) minmax(14rem, 1fr);
+  gap: 0.55rem 0.85rem;
+  align-items: center;
+}
+.settings-compact-row {
+  display: flex;
+  align-items: center;
+  gap: 0.45rem;
+  margin: 0;
+  min-width: 0;
+}
+.settings-compact-select {
+  justify-content: flex-start;
+  font-weight: 700;
+}
+.settings-compact-select select {
+  width: min(13rem, 100%);
+}
+.help-tip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.05rem;
+  height: 1.05rem;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, CanvasText 28%, Canvas);
+  color: color-mix(in srgb, CanvasText 70%, Canvas);
+  font-size: 0.78rem;
+  line-height: 1;
+  cursor: help;
+}
+.compact-settings-actions {
+  margin-top: 0.55rem;
+}
+.compact-settings-actions #live-settings-status {
+  font-size: 0.9rem;
+}
+@media (max-width: 760px) {
+  .settings-compact-grid {
+    grid-template-columns: 1fr;
+  }
 }

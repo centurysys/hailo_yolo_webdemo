@@ -36,17 +36,31 @@
         <button id="session-stop" class="secondary" type="button">Stop</button>
       </div>
 
-      <section class="live-settings-card" aria-labelledby="live-settings-title">
+      <section class="live-settings-card compact-live-settings" aria-labelledby="live-settings-title">
         <div class="panel-heading compact-heading">
           <h4 id="live-settings-title">Live AI settings</h4>
           <span id="live-settings-edit-state" class="muted">editable while stopped</span>
         </div>
-        <label class="checkbox-control">
-          <input id="live-debug-overlay" type="checkbox">
-          <span>AI activity marker</span>
-        </label>
-        <p class="muted live-settings-help">AI preview 左上に小さな点滅マーカーと frame 番号を表示します。変更は次回 Start 時に反映されます。</p>
-        <div class="settings-actions">
+
+        <div class="settings-compact-grid">
+          <label class="checkbox-control settings-compact-row">
+            <input id="live-debug-overlay" type="checkbox">
+            <span>AI activity marker</span>
+            <span class="help-tip" title="AI preview 左上に小さな点滅マーカーと frame 番号を表示します。">?</span>
+          </label>
+
+          <label class="settings-compact-row settings-compact-select">
+            <span>Overlay amount</span>
+            <select id="live-overlay-preset" title="Upload と同じ preset で bbox / label の表示量を切り替えます。Manual は Live では使いません。">
+              <option value="light">Light</option>
+              <option value="balanced">Balanced</option>
+              <option value="rich">Rich</option>
+              <option value="boxes-only">Boxes only</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="settings-actions compact-settings-actions">
           <button id="live-settings-save" class="secondary" type="button">Saved</button>
           <span id="live-settings-status" class="muted"></span>
         </div>
