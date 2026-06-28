@@ -7,10 +7,14 @@
 
 import std/[json, locks, os, osproc, streams, strformat, strutils, tables]
 
+import ./camera_relay
+
 const
   defaultRtspTransport* = "udp"
   defaultInputMode* = "relay"
   defaultPathctlPath* = "/usr/local/sbin/mediamtx-pathctl"
+  defaultRelayRtspBaseUrl* = "rtsp://127.0.0.1:8554"
+  defaultRelayFfmpegPath* = "/usr/bin/ffmpeg"
   cameraSlotIds* = ["cam1", "cam2", "cam3", "cam4"]
 
 type
@@ -42,6 +46,8 @@ type
     lock: Lock
     configPath: string
     pathctlPath: string
+    rtspBaseUrl: string
+    relayManager: CameraRelayManager
     slots: Table[string, CameraSlot]
 
 proc nowPidSuffix(): string =
@@ -95,6 +101,16 @@ proc validateInputMode*(value: string): string =
     result = mode
   else:
     raise newException(ValueError, &"invalid camera input mode: {value}")
+
+proc mediaPathUrl(baseUrl, path: string): string =
+  let normalizedBase = baseUrl.strip().strip(chars = {'/'})
+  let normalizedPath = path.strip().strip(chars = {'/'})
+  if normalizedBase.len == 0:
+    result = normalizedPath
+  elif normalizedPath.len == 0:
+    result = normalizedBase
+  else:
+    result = &"{normalizedBase}/{normalizedPath}"
 
 proc initDefaultSlots(store: LiveCameraStore) =
   store.slots = initTable[string, CameraSlot]()
@@ -178,11 +194,18 @@ proc loadFromDisk(store: LiveCameraStore) =
     let slot = parseSlotNode(item, "")
     store.slots[slot.id] = slot
 
-proc newLiveCameraStore*(configPath: string; pathctlPath = defaultPathctlPath): LiveCameraStore =
+proc newLiveCameraStore*(
+    configPath: string;
+    pathctlPath = defaultPathctlPath;
+    ffmpegPath = defaultRelayFfmpegPath;
+    rtspBaseUrl = defaultRelayRtspBaseUrl
+  ): LiveCameraStore =
   new(result)
   initLock(result.lock)
   result.configPath = configPath
   result.pathctlPath = pathctlPath
+  result.rtspBaseUrl = rtspBaseUrl
+  result.relayManager = newCameraRelayManager(ffmpegPath)
   result.loadFromDisk()
   ## Make sure the file exists with a complete four-slot skeleton.  This also
   ## creates the parent directory on a fresh package.
@@ -191,6 +214,8 @@ proc newLiveCameraStore*(configPath: string; pathctlPath = defaultPathctlPath): 
 
 proc close*(store: LiveCameraStore) =
   if store != nil:
+    if store.relayManager != nil:
+      store.relayManager.close()
     deinitLock(store.lock)
 
 proc parseCameraUpdate*(body: string): CameraUpdate =
@@ -235,20 +260,43 @@ proc runPathctl(store: LiveCameraStore; args: seq[string]): CameraApplyResult =
       process.close()
     result = CameraApplyResult(ok: false, message: e.msg)
 
+proc deleteMediamtxPath(store: LiveCameraStore; path: string): CameraApplyResult =
+  ## Deleting an absent path is not a fatal condition for the demo-side config.
+  result = store.runPathctl(@["delete", path])
+  if not result.ok and ("404" in result.message or "not found" in result.message.toLowerAscii()):
+    result.ok = true
+    result.message = "path was already absent"
+
 proc applySlot(store: LiveCameraStore; slot: CameraSlot): CameraApplyResult =
-  if slot.enabled and slot.source.len > 0:
-    result = store.runPathctl(@[
+  if not slot.enabled or slot.source.len == 0:
+    discard store.relayManager.stopRelay(slot.id)
+    return store.deleteMediamtxPath(slot.mediamtxPath)
+
+  if slot.inputMode == "direct":
+    discard store.relayManager.stopRelay(slot.id)
+    return store.runPathctl(@[
       "set",
       slot.mediamtxPath,
       &"--source:{slot.source}",
       &"--transport:{slot.rtspTransport}"
     ])
-  else:
-    ## Deleting an absent path is not a fatal condition for the demo-side config.
-    result = store.runPathctl(@["delete", slot.mediamtxPath])
-    if not result.ok and ("404" in result.message or "not found" in result.message.toLowerAscii()):
-      result.ok = true
-      result.message = "path was already absent"
+
+  let deleteResult = store.deleteMediamtxPath(slot.mediamtxPath)
+  if not deleteResult.ok:
+    discard store.relayManager.stopRelay(slot.id)
+    return CameraApplyResult(
+      ok: false,
+      message: &"failed to clear MediaMTX path before relay start: {deleteResult.message}"
+    )
+
+  let outputRtsp = mediaPathUrl(store.rtspBaseUrl, slot.mediamtxPath)
+  let relayStatus = store.relayManager.startRelay(slot.id, slot.source, outputRtsp)
+  result.ok = relayStatus.state == crRunning
+  result.message = relayStatus.message
+  if relayStatus.state == crRunning:
+    result.message = &"ffmpeg relay started: {slot.id} -> {relayStatus.outputRtsp}"
+  elif result.message.len == 0:
+    result.message = &"ffmpeg relay failed for {slot.id}"
 
 proc camerasJson*(store: LiveCameraStore): string {.gcsafe.} =
   {.cast(gcsafe).}:
