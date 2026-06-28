@@ -4,10 +4,11 @@
 ## RTSP stream and publish it back to MediaMTX with `-c:v copy`, which normalizes
 ## RTSP/RTP/timestamp details that can otherwise upset some hardware decoders.
 
-import std/[locks, osproc, sequtils, strformat, strutils, tables, times]
+import std/[locks, os, osproc, sequtils, strformat, strutils, tables, times]
 
 const
   defaultRelayLogLevel* = "warning"
+  defaultRelayStartGraceMs* = 300
 
 type
   CameraRelayState* = enum
@@ -108,6 +109,14 @@ proc processRunning(process: Process): bool =
   except CatchableError:
     result = false
 
+proc processExitCode(process: Process): int =
+  if process == nil:
+    return -1
+  try:
+    result = process.peekExitCode()
+  except CatchableError:
+    result = -1
+
 proc statusOf(relay: CameraRelayProcess): CameraRelayStatus =
   result.slotId = relay.slotId
   result.pid = relay.process.processPid()
@@ -119,8 +128,12 @@ proc statusOf(relay: CameraRelayProcess): CameraRelayStatus =
     result.state = crRunning
   else:
     result.state = crFailed
-    if result.message.len == 0:
-      result.message = "relay process is not running"
+    let code = relay.process.processExitCode()
+    if result.message.len == 0 or result.message.startsWith("relay started"):
+      if code >= 0:
+        result.message = &"relay process exited with {code}"
+      else:
+        result.message = "relay process is not running"
 
 proc stoppedStatus(slotId: string; message = "relay is stopped"): CameraRelayStatus =
   CameraRelayStatus(
@@ -220,8 +233,14 @@ proc startRelay*(
       startedAtUnix: now().toTime().toUnix(),
       message: &"relay started for {slotId}"
     )
+    sleep(defaultRelayStartGraceMs)
+    let initialStatus = statusOf(relay)
+    if initialStatus.state != crRunning:
+      relay.stopRelayProcess()
+      return initialStatus
+
     manager.relays[slotId] = relay
-    result = statusOf(relay)
+    result = initialStatus
 
 proc relayStatus*(manager: CameraRelayManager; slotId: string): CameraRelayStatus =
   if manager == nil:

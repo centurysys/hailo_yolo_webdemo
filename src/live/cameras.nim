@@ -15,6 +15,8 @@ const
   defaultPathctlPath* = "/usr/local/sbin/mediamtx-pathctl"
   defaultRelayRtspBaseUrl* = "rtsp://127.0.0.1:8554"
   defaultRelayFfmpegPath* = "/usr/bin/ffmpeg"
+  defaultStartupSyncAttempts* = 12
+  defaultStartupSyncRetryDelayMs* = 1000
   cameraSlotIds* = ["cam1", "cam2", "cam3", "cam4"]
 
 type
@@ -366,17 +368,40 @@ proc deleteCameraJson*(store: LiveCameraStore; id: string): string {.gcsafe.} =
   {.cast(gcsafe).}:
     result = store.deleteCamera(id).operationJson()
 
-proc syncEnabledCameras*(store: LiveCameraStore): seq[CameraOperationResult] {.gcsafe.} =
+proc syncEnabledCameras*(
+    store: LiveCameraStore;
+    maxAttempts = defaultStartupSyncAttempts;
+    retryDelayMs = defaultStartupSyncRetryDelayMs
+  ): seq[CameraOperationResult] {.gcsafe.} =
   ## Best-effort startup sync.  This is intentionally non-fatal: during boot,
-  ## MediaMTX may not be ready yet depending on service ordering.  The Web UI can
-  ## still set a camera later and retry through the same pathctl layer.
+  ## MediaMTX may not be ready yet depending on service ordering.  Retry pending
+  ## slots for a short period so saved camera settings recover after an instance
+  ## restart without requiring a manual re-save from the Web UI.
   {.cast(gcsafe).}:
-    var slots: seq[CameraSlot]
+    var pending: seq[CameraSlot]
     withLock store.lock:
       for id in cameraSlotIds:
         let slot = store.slots.getOrDefault(id, defaultSlot(id))
         if slot.enabled and slot.source.len > 0:
-          slots.add(slot)
+          pending.add(slot)
 
-    for slot in slots:
-      result.add(CameraOperationResult(slot: slot, mediamtx: store.applySlot(slot)))
+    if pending.len == 0:
+      return @[]
+
+    let attempts = max(1, maxAttempts)
+    for attempt in 1 .. attempts:
+      var nextPending: seq[CameraSlot]
+      result.setLen(0)
+
+      for slot in pending:
+        let op = CameraOperationResult(slot: slot, mediamtx: store.applySlot(slot))
+        result.add(op)
+        if not op.mediamtx.ok:
+          nextPending.add(slot)
+
+      if nextPending.len == 0:
+        break
+
+      pending = nextPending
+      if attempt < attempts and retryDelayMs > 0:
+        sleep(retryDelayMs)
