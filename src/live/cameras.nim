@@ -7,9 +7,16 @@
 
 import std/[json, locks, os, osproc, streams, strformat, strutils, tables]
 
+import ./camera_relay
+
 const
   defaultRtspTransport* = "udp"
+  defaultInputMode* = "relay"
   defaultPathctlPath* = "/usr/local/sbin/mediamtx-pathctl"
+  defaultRelayRtspBaseUrl* = "rtsp://127.0.0.1:8554"
+  defaultRelayFfmpegPath* = "/usr/bin/ffmpeg"
+  defaultStartupSyncAttempts* = 12
+  defaultStartupSyncRetryDelayMs* = 1000
   cameraSlotIds* = ["cam1", "cam2", "cam3", "cam4"]
 
 type
@@ -18,6 +25,7 @@ type
     name*: string
     source*: string
     rtspTransport*: string
+    inputMode*: string
     enabled*: bool
     mediamtxPath*: string
 
@@ -25,6 +33,7 @@ type
     name*: string
     source*: string
     rtspTransport*: string
+    inputMode*: string
     enabled*: bool
 
   CameraApplyResult* = object
@@ -39,6 +48,8 @@ type
     lock: Lock
     configPath: string
     pathctlPath: string
+    rtspBaseUrl: string
+    relayManager: CameraRelayManager
     slots: Table[string, CameraSlot]
 
 proc nowPidSuffix(): string =
@@ -68,6 +79,7 @@ proc defaultSlot(id: string): CameraSlot =
     name: defaultSlotName(id),
     source: "",
     rtspTransport: defaultRtspTransport,
+    inputMode: defaultInputMode,
     enabled: false,
     mediamtxPath: id
   )
@@ -82,6 +94,26 @@ proc validateTransport*(value: string): string =
   else:
     raise newException(ValueError, &"invalid RTSP transport: {value}")
 
+proc validateInputMode*(value: string): string =
+  let mode = value.strip().toLowerAscii()
+  if mode.len == 0:
+    return defaultInputMode
+  case mode
+  of "relay", "direct":
+    result = mode
+  else:
+    raise newException(ValueError, &"invalid camera input mode: {value}")
+
+proc mediaPathUrl(baseUrl, path: string): string =
+  let normalizedBase = baseUrl.strip().strip(chars = {'/'})
+  let normalizedPath = path.strip().strip(chars = {'/'})
+  if normalizedBase.len == 0:
+    result = normalizedPath
+  elif normalizedPath.len == 0:
+    result = normalizedBase
+  else:
+    result = &"{normalizedBase}/{normalizedPath}"
+
 proc initDefaultSlots(store: LiveCameraStore) =
   store.slots = initTable[string, CameraSlot]()
   for id in cameraSlotIds:
@@ -93,6 +125,7 @@ proc slotToJson(slot: CameraSlot): JsonNode =
   result["name"] = %slot.name
   result["source"] = %slot.source
   result["rtspTransport"] = %slot.rtspTransport
+  result["inputMode"] = %slot.inputMode
   result["enabled"] = %slot.enabled
   result["mediamtxPath"] = %slot.mediamtxPath
   result["webrtcPath"] = %(&"/{slot.mediamtxPath}")
@@ -141,6 +174,7 @@ proc parseSlotNode(node: JsonNode; fallbackId: string): CameraSlot =
     name: node.getStringField("name", base.name).strip(),
     source: node.getStringField("source", "").strip(),
     rtspTransport: validateTransport(node.getStringField("rtspTransport", defaultRtspTransport)),
+    inputMode: validateInputMode(node.getStringField("inputMode", defaultInputMode)),
     enabled: node.getBoolField("enabled", false),
     mediamtxPath: node.getStringField("mediamtxPath", id).strip()
   )
@@ -162,11 +196,18 @@ proc loadFromDisk(store: LiveCameraStore) =
     let slot = parseSlotNode(item, "")
     store.slots[slot.id] = slot
 
-proc newLiveCameraStore*(configPath: string; pathctlPath = defaultPathctlPath): LiveCameraStore =
+proc newLiveCameraStore*(
+    configPath: string;
+    pathctlPath = defaultPathctlPath;
+    ffmpegPath = defaultRelayFfmpegPath;
+    rtspBaseUrl = defaultRelayRtspBaseUrl
+  ): LiveCameraStore =
   new(result)
   initLock(result.lock)
   result.configPath = configPath
   result.pathctlPath = pathctlPath
+  result.rtspBaseUrl = rtspBaseUrl
+  result.relayManager = newCameraRelayManager(ffmpegPath)
   result.loadFromDisk()
   ## Make sure the file exists with a complete four-slot skeleton.  This also
   ## creates the parent directory on a fresh package.
@@ -175,6 +216,8 @@ proc newLiveCameraStore*(configPath: string; pathctlPath = defaultPathctlPath): 
 
 proc close*(store: LiveCameraStore) =
   if store != nil:
+    if store.relayManager != nil:
+      store.relayManager.close()
     deinitLock(store.lock)
 
 proc parseCameraUpdate*(body: string): CameraUpdate =
@@ -185,6 +228,10 @@ proc parseCameraUpdate*(body: string): CameraUpdate =
   result.name = node.getStringField("name", "").strip()
   result.source = node.getStringField("source", "").strip()
   result.rtspTransport = validateTransport(node.getStringField("rtspTransport", defaultRtspTransport))
+  if node.hasKey("inputMode"):
+    result.inputMode = validateInputMode(node.getStringField("inputMode", defaultInputMode))
+  else:
+    result.inputMode = ""
   result.enabled = node.getBoolField("enabled", result.source.len > 0)
 
 proc runPathctl(store: LiveCameraStore; args: seq[string]): CameraApplyResult =
@@ -215,20 +262,43 @@ proc runPathctl(store: LiveCameraStore; args: seq[string]): CameraApplyResult =
       process.close()
     result = CameraApplyResult(ok: false, message: e.msg)
 
+proc deleteMediamtxPath(store: LiveCameraStore; path: string): CameraApplyResult =
+  ## Deleting an absent path is not a fatal condition for the demo-side config.
+  result = store.runPathctl(@["delete", path])
+  if not result.ok and ("404" in result.message or "not found" in result.message.toLowerAscii()):
+    result.ok = true
+    result.message = "path was already absent"
+
 proc applySlot(store: LiveCameraStore; slot: CameraSlot): CameraApplyResult =
-  if slot.enabled and slot.source.len > 0:
-    result = store.runPathctl(@[
+  if not slot.enabled or slot.source.len == 0:
+    discard store.relayManager.stopRelay(slot.id)
+    return store.deleteMediamtxPath(slot.mediamtxPath)
+
+  if slot.inputMode == "direct":
+    discard store.relayManager.stopRelay(slot.id)
+    return store.runPathctl(@[
       "set",
       slot.mediamtxPath,
       &"--source:{slot.source}",
       &"--transport:{slot.rtspTransport}"
     ])
-  else:
-    ## Deleting an absent path is not a fatal condition for the demo-side config.
-    result = store.runPathctl(@["delete", slot.mediamtxPath])
-    if not result.ok and ("404" in result.message or "not found" in result.message.toLowerAscii()):
-      result.ok = true
-      result.message = "path was already absent"
+
+  let deleteResult = store.deleteMediamtxPath(slot.mediamtxPath)
+  if not deleteResult.ok:
+    discard store.relayManager.stopRelay(slot.id)
+    return CameraApplyResult(
+      ok: false,
+      message: &"failed to clear MediaMTX path before relay start: {deleteResult.message}"
+    )
+
+  let outputRtsp = mediaPathUrl(store.rtspBaseUrl, slot.mediamtxPath)
+  let relayStatus = store.relayManager.startRelay(slot.id, slot.source, outputRtsp)
+  result.ok = relayStatus.state == crRunning
+  result.message = relayStatus.message
+  if relayStatus.state == crRunning:
+    result.message = &"ffmpeg relay started: {slot.id} -> {relayStatus.outputRtsp}"
+  elif result.message.len == 0:
+    result.message = &"ffmpeg relay failed for {slot.id}"
 
 proc camerasJson*(store: LiveCameraStore): string {.gcsafe.} =
   {.cast(gcsafe).}:
@@ -266,6 +336,10 @@ proc setCamera*(store: LiveCameraStore; id: string; update: CameraUpdate): Camer
         slot.name = defaultSlotName(id)
       slot.source = update.source
       slot.rtspTransport = update.rtspTransport
+      if update.inputMode.len > 0:
+        slot.inputMode = update.inputMode
+      elif slot.inputMode.len == 0:
+        slot.inputMode = defaultInputMode
       slot.enabled = update.enabled and update.source.len > 0
       slot.mediamtxPath = id
       store.slots[id] = slot
@@ -294,17 +368,40 @@ proc deleteCameraJson*(store: LiveCameraStore; id: string): string {.gcsafe.} =
   {.cast(gcsafe).}:
     result = store.deleteCamera(id).operationJson()
 
-proc syncEnabledCameras*(store: LiveCameraStore): seq[CameraOperationResult] {.gcsafe.} =
+proc syncEnabledCameras*(
+    store: LiveCameraStore;
+    maxAttempts = defaultStartupSyncAttempts;
+    retryDelayMs = defaultStartupSyncRetryDelayMs
+  ): seq[CameraOperationResult] {.gcsafe.} =
   ## Best-effort startup sync.  This is intentionally non-fatal: during boot,
-  ## MediaMTX may not be ready yet depending on service ordering.  The Web UI can
-  ## still set a camera later and retry through the same pathctl layer.
+  ## MediaMTX may not be ready yet depending on service ordering.  Retry pending
+  ## slots for a short period so saved camera settings recover after an instance
+  ## restart without requiring a manual re-save from the Web UI.
   {.cast(gcsafe).}:
-    var slots: seq[CameraSlot]
+    var pending: seq[CameraSlot]
     withLock store.lock:
       for id in cameraSlotIds:
         let slot = store.slots.getOrDefault(id, defaultSlot(id))
         if slot.enabled and slot.source.len > 0:
-          slots.add(slot)
+          pending.add(slot)
 
-    for slot in slots:
-      result.add(CameraOperationResult(slot: slot, mediamtx: store.applySlot(slot)))
+    if pending.len == 0:
+      return @[]
+
+    let attempts = max(1, maxAttempts)
+    for attempt in 1 .. attempts:
+      var nextPending: seq[CameraSlot]
+      result.setLen(0)
+
+      for slot in pending:
+        let op = CameraOperationResult(slot: slot, mediamtx: store.applySlot(slot))
+        result.add(op)
+        if not op.mediamtx.ok:
+          nextPending.add(slot)
+
+      if nextPending.len == 0:
+        break
+
+      pending = nextPending
+      if attempt < attempts and retryDelayMs > 0:
+        sleep(retryDelayMs)

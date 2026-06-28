@@ -25,6 +25,7 @@ const cameraIdInput = document.getElementById('camera-id');
 const cameraNameInput = document.getElementById('camera-name');
 const cameraSourceInput = document.getElementById('camera-source');
 const cameraTransportInput = document.getElementById('camera-transport');
+const cameraDirectProxyInput = document.getElementById('camera-direct-proxy');
 const cameraEnabledInput = document.getElementById('camera-enabled');
 const cameraDeleteButton = document.getElementById('camera-delete');
 const cameraCancelButton = document.getElementById('camera-cancel');
@@ -141,6 +142,15 @@ function webrtcUrl(slot) {
 
 function hlsUrl(slot) {
   return absoluteMediaUrl(8888, slot.hlsPath || '/' + slot.mediamtxPath);
+}
+
+function normalizedInputMode(slot) {
+  const mode = String(slot && slot.inputMode || '').trim().toLowerCase();
+  return mode === 'direct' ? 'direct' : 'relay';
+}
+
+function inputModeLabel(slot) {
+  return normalizedInputMode(slot) === 'direct' ? 'direct' : 'relay';
 }
 
 function aiWebrtcUrl() {
@@ -420,6 +430,11 @@ function renderCameraCard(slot) {
     pathLabel.textContent = '/' + slot.mediamtxPath;
     meta.appendChild(pathLabel);
 
+    const mode = document.createElement('span');
+    mode.className = 'muted';
+    mode.textContent = `input: ${inputModeLabel(slot)}`;
+    meta.appendChild(mode);
+
     const source = document.createElement('span');
     source.className = 'muted one-line';
     source.textContent = slot.source;
@@ -517,6 +532,7 @@ function openCameraDialog(slot) {
   cameraNameInput.value = slot.name || defaultSlotName(slot.id);
   cameraSourceInput.value = slot.source || '';
   cameraTransportInput.value = slot.rtspTransport || 'udp';
+  cameraDirectProxyInput.checked = normalizedInputMode(slot) === 'direct';
 
   // New camera slots should become usable with a single Save after the user
   // enters an RTSP URL. Existing disabled slots keep their saved state unless
@@ -549,6 +565,7 @@ async function saveCamera(event) {
     name: cameraNameInput.value.trim() || defaultSlotName(cameraId),
     source,
     rtspTransport: cameraTransportInput.value,
+    inputMode: cameraDirectProxyInput.checked ? 'direct' : 'relay',
     enabled: Boolean(source) && cameraEnabledInput.checked,
   };
 

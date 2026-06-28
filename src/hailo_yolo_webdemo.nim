@@ -29,7 +29,12 @@ when isMainModule:
 
   let jobStore = newJobStore()
   let pathctlPath = getMediamtxPathctlPath()
-  let cameraStore = newLiveCameraStore(liveCameraConfigPath, pathctlPath)
+  let cameraStore = newLiveCameraStore(
+    liveCameraConfigPath,
+    pathctlPath,
+    getLiveFfmpegPath(),
+    liveRtspBaseUrl
+  )
   let targetStore = newLiveTargetStore(liveTargetConfigPath)
   let settingsStore = newLiveSettingsStore(liveSettingsConfigPath)
   let liveOwner = startLiveInferOwner()
